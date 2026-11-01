@@ -2,6 +2,9 @@ package io.github.yongyong14.parking_server.global.config;
 
 import io.github.yongyong14.parking_server.global.exception.ErrorCode;
 import io.github.yongyong14.parking_server.global.response.ApiResponse;
+import io.github.yongyong14.parking_server.global.health.HealthController.HealthResponse;
+import io.swagger.v3.core.converter.AnnotatedType;
+import io.swagger.v3.core.converter.ModelConverters;
 import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.info.Info;
@@ -44,18 +47,21 @@ public class OpenApiConfig {
     }
 
     @Bean
-    OpenApiCustomizer commonSuccessSchema() {
-        return api -> api.getComponents().getSchemas().values().stream()
-                .filter(schema -> schema.getProperties() != null
-                        && schema.getProperties().keySet().containsAll(List.of("success", "data", "error"))
-                        && schema != api.getComponents().getSchemas().get("CommonFailure"))
-                .forEach(schema -> {
-                    schema.setRequired(List.of("success", "data", "error"));
-                    schema.addProperty("success", new BooleanSchema()._const(true));
-                    Schema<?> data = (Schema<?>) schema.getProperties().get("data");
-                    schema.addProperty("data", new ComposedSchema().anyOf(List.of(data, nullSchema())));
-                    schema.addProperty("error", nullSchema());
-                });
+    OpenApiCustomizer healthSuccessSchema() {
+        // Explicit endpoint contract: health always creates a non-null HealthResponse.
+        // Do not infer other ApiResponse<T> contracts from T or property names.
+        return api -> {
+            var health = ModelConverters.getInstance(true).resolveAsResolvedSchema(
+                    new AnnotatedType(HealthResponse.class).resolveAsRef(true));
+            health.referencedSchemas.forEach(api.getComponents()::addSchemas);
+            var success = new ObjectSchema()
+                    .addProperty("success", new BooleanSchema()._const(true))
+                    .addProperty("data", health.schema)
+                    .addProperty("error", nullSchema());
+            success.setRequired(List.of("success", "data", "error"));
+            // Only this explicitly owned schema is replaced; repeated calls are identical.
+            api.getComponents().addSchemas("HealthSuccess", success);
+        };
     }
 
     private static Schema<Object> nullSchema() {

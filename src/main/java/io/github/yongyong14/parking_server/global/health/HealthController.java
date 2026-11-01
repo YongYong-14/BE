@@ -15,8 +15,8 @@ import org.springframework.web.bind.annotation.RestController;
 public class HealthController {
     @Operation(summary = "서버 기본 응답 확인", description = "DB나 외부 API를 호출하지 않는 기본 HTTP 응답 확인용이며, 외부 의존성의 정상 상태를 보장하지 않음")
     @ApiResponses({
-        @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "기본 HTTP 응답 성공", useReturnTypeSchema = true,
-            content = @Content(mediaType = "application/json", examples = @ExampleObject(value = """
+        @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "기본 HTTP 응답 성공",
+            content = @Content(mediaType = "application/json", schema = @Schema(ref = "#/components/schemas/HealthSuccess"), examples = @ExampleObject(value = """
                 {"success":true,"data":{"status":"UP"},"error":null}
                 """))),
         @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "405", ref = "#/components/responses/METHOD_NOT_ALLOWED"),

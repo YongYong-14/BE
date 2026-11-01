@@ -38,12 +38,14 @@ class OpenApiTests {
         assertRequired(success, "success", "data", "error");
         assertThat(success.at("/properties/success/const").asBoolean()).isTrue();
         assertThat(success.at("/properties/error/type").asText()).isEqualTo("null");
-        JsonNode variants = success.at("/properties/data/anyOf");
-        assertThat(variants.size()).isEqualTo(2);
-        JsonNode health = resolve(doc, variants.get(0));
+        JsonNode data = success.at("/properties/data");
+        assertThat(data.has("anyOf")).isFalse();
+        assertThat(data.has("oneOf")).isFalse();
+        assertThat(data.has("nullable")).isFalse();
+        JsonNode health = resolve(doc, data);
+        assertThat(health.path("type").asText()).isEqualTo("object");
         assertThat(health.at("/properties/status/type").asText()).isEqualTo("string");
         assertRequired(health, "status");
-        assertThat(variants.get(1).path("type").asText()).isEqualTo("null");
         for (String status : new String[]{"405", "406", "500"}) {
             JsonNode response = resolve(doc, responses.path(status));
             JsonNode media = response.path("content").path("application/json");

@@ -10,6 +10,10 @@ Java 21이 필요합니다. Spring Boot 4.1.2를 사용하며 DB 설정 없이 �
 
 기본 포트는 8080입니다.
 
+배포 시 환경 변수 `SPRING_PROFILES_ACTIVE=prod`를 반드시 설정해 운영 프로필을 활성화하세요.
+`application-prod.yaml`에서 OpenAPI 문서와 Swagger UI를 비활성화합니다.
+프로필을 지정하지 않은 로컬 실행에서는 기존처럼 아래 문서를 사용할 수 있습니다.
+
 - Swagger UI: http://localhost:8080/swagger-ui.html
 - OpenAPI JSON: http://localhost:8080/v3/api-docs
 - Swagger 설정: http://localhost:8080/v3/api-docs/swagger-config
@@ -33,12 +37,17 @@ health는 DB나 외부 API를 호출하지 않는 기본 HTTP 응답 확인용�
 문서 JSON과 Swagger 설정은 `ApiResponse`로 감싸지 않습니다.
 
 컨트롤러에 `@Tag`, 메서드에 `@Operation`으로 목적과 동작을 기록합니다.
-성공 반환 타입은 `ApiResponse<실제DTO>`로 선언하면 제네릭 data 구조가 문서에 반영됩니다.
+성공 반환 타입은 `ApiResponse<실제DTO>`로 선언하고, data의 null 허용 여부는 실제 API 동작을 기준으로 문서화합니다.
 DTO의 항상 존재하는 필드는 `@Schema(requiredMode = Schema.RequiredMode.REQUIRED)`로 표시합니다.
 성공 예시는 health 컨트롤러의 `@Content(examples = @ExampleObject(...))` 방식을 참고하세요.
 
-OpenAPI 3.1을 사용합니다. 공통 성공 스키마는 success/data/error를 모두 required로 표시하며,
-success는 true, error는 `type: "null"`, data는 실제 DTO와 null의 `anyOf`로 표현합니다.
+OpenAPI 3.1을 사용합니다. health는 명시적인 `HealthSuccess` 스키마를 참조합니다.
+success/data/error는 모두 required이며 success는 true, error는 `type: "null"`,
+data는 실제 `HealthResponse` 객체로 null을 허용하지 않습니다.
+커스터마이저는 이 명시적인 성공 계약만 구성하며 다른 공통 응답이나 DTO는 변경하지 않습니다.
+모든 `ApiResponse<T>`에 null을 일괄 추가하거나 T가 Void가 아니라는 이유로 null 불가를 추정하지 않습니다.
+데이터 없는 JSON 성공 응답은 실제로 null을 반환한다면 data를 `type: "null"`로 명시하고,
+선택적으로 null을 반환하는 응답만 실제 DTO와 null의 `anyOf`로 표현하세요.
 필수 필드 존재와 null 허용은 별개입니다. 공통 실패 `CommonFailure`는 success=false,
 data=null, error는 필수 code/message 문자열을 갖는 `ErrorResponse`입니다.
 
