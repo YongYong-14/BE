@@ -1,3 +1,11 @@
 spring:
   application:
     name: parking-server
+
+springdoc:
+  default-produces-media-type: application/json
+  api-docs:
+    version: OPENAPI_3_1
+  paths-to-match: /api/v1/**
+  packages-to-scan: io.github.yongyong14.parking_server
+  override-with-generic-response: false
