@@ -40,3 +40,4 @@ out/
 .env
 .env.*
 !.env.example
+data/raw/BND_SIGUNGU_PG*
