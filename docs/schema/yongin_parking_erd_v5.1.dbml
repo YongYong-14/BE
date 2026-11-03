@@ -1,8 +1,8 @@
-// Project copy: reference preserved; parking_lots pair checks added for V5.
+// Canonical ERD v5.1. Executable schema: src/main/resources/db/migration/ (V1-V5).
 Project yongin_parking {
   database_type: 'PostgreSQL'
   Note: '''
-  # 용인 불법주정차 알림 — ERD v5 (2026-11-03, GPT 4차 교차검증 반영)
+  # 용인 불법주정차 알림 — ERD v5.1 (API v0.6, 2026-11-03)
 
   ## 설계 기준
   - 거리·포함 판정 컬럼은 전부 geography(4326) → ST_DWithin 결과가 미터 단위
@@ -17,13 +17,13 @@ Project yongin_parking {
   - 단, 주차 기록만 정리할 때는 위치 로그를 지우지 않음(SET NULL). 위치 동의만 철회한 경우는 서비스 로직에서 파기
   - 9월 26일은 기록 완전성이 의심되어 분석에서 제외하고, 관측 종료일을 9월 25일로 설정 (26일 110건 vs 9월 금요일 평균 192건, 19시 이후 기록 없음)
 
-  ## DBML 밖 객체 → migration_extra.sql 에 포함 (반드시 schema 다음에 실행)
-  - GIST 인덱스 5개, 부분 유니크 3개(활성 차량·활성 예측 버전·원천별 활성 import)
+  ## DBML 밖 객체 → src/main/resources/db/migration/V3__erd_v5_guards_and_indexes.sql
+  - GIST 인덱스 6개, 부분 유니크 3개(활성 차량·활성 예측 버전·원천별 활성 import)
   - 예측 버전 수명주기: 적재 중(frozen_at NULL) → freeze(실제 행 대조 후 동결) → activate(동결된 것 중 선택)
     · 동결된 버전은 대상 격자·예측 행·설정값 INSERT/UPDATE/DELETE 전부 차단 (활성 여부와 무관)
     · 수정이 필요하면 새 버전 생성. 삭제는 purge 함수로만(비활성 + 판정 미참조)
     · purge 판별은 설정값이 아니라 실행 역할: SECURITY DEFINER 함수 소유자로 실행될 때만 허용
-    · 역할 분리(roles_and_grants.sql): app(API 서버) / etl(적재·동결·활성화) / admin(정리). 소유자 계정으로 앱 접속 금지
+    · 역할 분리(scripts/db/bootstrap.sql + src/main/resources/db/migration/V4__erd_v5_grants.sql): app(API 서버) / etl(적재·동결·활성화) / admin(정리). 소유자 계정으로 앱 접속 금지
     · 동시성: 자식 변경은 부모 버전 행 FOR SHARE, 동결·활성화는 FOR UPDATE → 서로 직렬화
   - 규칙 묶음 수명주기: 작성 중 → publish → 판정에 사용. 공개된 묶음은 규칙 추가·수정·삭제 차단
   - 판정은 공개된 규칙 묶음·동결된 예측 버전만 참조 가능(트리거)

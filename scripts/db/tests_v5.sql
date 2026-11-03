@@ -1,5 +1,5 @@
 -- ERD v5 회귀 테스트
--- 실행 순서: 빈 DB → CREATE EXTENSION postgis → schema_v5.sql → migration_extra.sql → roles_and_grants.sql → 이 파일
+-- 실행 순서: 격리 DB → scripts/db/bootstrap.sql → Flyway V1~V5(src/main/resources/db/migration/) → 이 파일
 -- 슈퍼유저로 실행(테스트용 로그인 역할 생성·SET ROLE). 각 케이스는 "기대한 오류 메시지 접두사"(FROZEN_VERSION: 등. SQLSTATE 아님)가 났는지까지 확인한다.
 -- 테스트 전용 스키마 t를 만들고 끝나면 지운다. 마지막 줄에 PASS/FAIL 합계가 나오고, FAIL이 하나라도 있으면 에러로 끝난다.
 

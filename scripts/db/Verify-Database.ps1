@@ -140,13 +140,13 @@ try {
         Invoke-Docker @('exec', $container, 'psql', '-X', '-U', 'postgres', '-d', 'parking_verify',
             '-v', 'ON_ERROR_STOP=1', '-f', "/tmp/$file") *> (Join-Path $output "$file.log")
     }
-    Invoke-Docker @('cp', (Join-Path $repo 'docs/reference/tests_v5.sql'), "${container}:/tmp/tests_v5.sql")
+    Invoke-Docker @('cp', (Join-Path $PSScriptRoot 'tests_v5.sql'), "${container}:/tmp/tests_v5.sql")
     Invoke-Docker @('exec', $container, 'psql', '-X', '-U', 'postgres', '-d', 'parking_verify',
         '-v', 'ON_ERROR_STOP=1', '-f', '/tmp/tests_v5.sql') *> (Join-Path $output 'regression.log')
     # Normalize only the temporary copy, never the reference file.
     $concurrencyCopy = Join-Path $output 'tests_concurrency.sh'
     [IO.File]::WriteAllText($concurrencyCopy,
-        [IO.File]::ReadAllText((Join-Path $repo 'docs/reference/tests_concurrency.sh')).Replace("`r`n", "`n"),
+        [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'tests_concurrency.sh')).Replace("`r`n", "`n"),
         [Text.UTF8Encoding]::new($false))
     Invoke-Docker @('cp', $concurrencyCopy, "${container}:/tmp/tests_concurrency.sh")
     Invoke-Docker @('exec', '-e', 'PSQL=psql -U postgres -d parking_verify', $container,

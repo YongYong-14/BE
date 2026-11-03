@@ -1,4 +1,4 @@
-# PostgreSQL / Flyway — ERD v5 (#7)
+# PostgreSQL / Flyway — ERD v5.1 / API v0.6 (#7)
 
 현재 주차장 스키마는 V5로 ERD v5.1에 맞췄다. 변경 내용·원문 보호·API v0.6 정합성과
 검증 결과는 [주차장 V5 가이드](PARKING_LOTS_V5.md)를 참고한다.
@@ -11,9 +11,13 @@ PostgreSQL JDBC, Flyway starter 및 PostgreSQL 지원 모듈을 사용한다.
 Boot 4에서는 Flyway 자동 구성을 위해 starter가 필요하다
 ([공식 모듈화 안내](https://spring.io/blog/2025/10/28/modularizing-spring-boot/)).
 
-기준은 `docs/reference/schema_v5.sql`, `migration_extra.sql`,
-`roles_and_grants.sql`, API v0.5 DOCX다. 요청의 `migration_extra_v3.sql` 대신
-제공된 `migration_extra.sql`을 사용하도록 사용자 확인을 받았다. 참고 원본은 수정하지 않았다.
+적용 SQL의 기준은 `src/main/resources/db/migration/`의 V1~V5이며,
+ERD 기준은 [v5.1 DBML](schema/yongin_parking_erd_v5.1.dbml) 하나다.
+API 계약은 `docs/reference/용인 불법주정차 알림 — API 명세 v0.6 ERD v5.1 기준.docx`를 참고한다.
+중복 참고 SQL·DBML은 제거했으며, 기존 V1~V5의 내용과 체크섬은 유지한다.
+API 공유 원본 확인 상태와 보관 방안은 [참고 문서 안내](reference/README.md)에 기록했다.
+이 가이드는 최초 실행과 전체 검증, [주차장 가이드](PARKING_LOTS_V5.md)는 V5 이관과 API 계약,
+[연결 격리 가이드](VERIFICATION_ISOLATION.md)는 검증 실행기의 안전성과 회귀 검증을 담당한다.
 
 엔티티·BaseEntity·Auditing·컨트롤러·인증·판정 로직은 추가하지 않는다.
 Hibernate Spatial/JTS는 엔티티 공간 타입 매핑을 구현하는 후속 작업에서 추가한다.
@@ -114,13 +118,13 @@ Spring Boot는 IDE에서 실행하고 Compose에는 DB만 실행한다. `docker 
 | --- | --- | --- |
 | 관리자 선행 작업 | `scripts/db/bootstrap.sql` | PostGIS 확장 준비 → 역할/로그인 생성 → admin의 ETL 멤버십 → 스키마/접속 권한 |
 | V1 | `V1__verify_postgis.sql` | public의 PostGIS 3.6 확인 및 소유자 계정 분리 확인 |
-| V2 | `V2__erd_v5_schema.sql` | schema_v5 원문: 테이블 25개, 인덱스, 주석, CHECK/FK/CASCADE |
-| V3 | `V3__erd_v5_guards_and_indexes.sql` | migration_extra 원문: 부분 유니크·공간 인덱스·함수·트리거 |
+| V2 | `V2__erd_v5_schema.sql` | ERD v5 초기 테이블 25개, 인덱스, 주석, CHECK/FK/CASCADE |
+| V3 | `V3__erd_v5_guards_and_indexes.sql` | 부분 유니크·공간 인덱스·함수·트리거 |
 | V4 | `V4__erd_v5_grants.sql` | 기준 역할별 테이블·시퀀스·함수 권한 |
 | V5 | `V5__parking_lots_hours_and_fee.sql` | 요금 3값·시간 6컬럼, 원문 존재 시 중단, CHECK 4개 |
 
-V2/V3에는 `SET LOCAL search_path = public, pg_catalog`만 앞에 추가했다.
-V4의 역할 생성과 역할 간 GRANT는 관리자 bootstrap으로 이동했다. PUBLIC 권한 회수는
+V2/V3은 public search_path에서 실행한다.
+역할 생성과 역할 간 GRANT는 관리자 bootstrap이 담당한다. V4의 PUBLIC 권한 회수는
 마이그레이션 소유 객체에 한정해 관리자 소유 PostGIS 객체를 건드리지 않는다.
 기준 역할별 권한 의도는 그대로 유지한다.
 
@@ -134,6 +138,10 @@ PostGIS가 public을 먼저 채우더라도 별도 이력 스키마를 사용하
 `ddl-auto=validate`, `spring.sql.init.mode=never`, `baseline-on-migrate=false`,
 `clean-disabled=true`다. Flyway placeholder 치환을 꺼 원본 SQL의 내용을 그대로 실행한다.
 Hibernate와 schema.sql은 테이블을 생성하지 않는다.
+
+이미 적용된 V3/V4의 주석에는 옛 참고 파일명이 남아 있다. 체크섬 보존을 위해 주석도 수정하지 않는다.
+`schema_v5.sql`은 V2, `migration_extra.sql`은 V3, `roles_and_grants.sql`은 V4와
+`scripts/db/bootstrap.sql`에 해당한다. 실제 실행에는 이 옛 파일명이 필요하지 않다.
 
 ## 검증 재현
 
@@ -160,31 +168,26 @@ tmpfs 데이터는 정지 시 사라지며, 정지된 검증 컨테이너 항목
 - 앱/ETL의 purge 거부, admin의 실행 허용, 소유자 역할 가장 불가, 지연 제약 트리거 확인
 - 보충 SQL: 활성 차량 1대, 이벤트 멱등키, 차량 소유권 FK, GPS 없는 AUTO 금지,
   200m 제한, 이벤트 삭제 시 로그 연결 해제, 사용자 삭제 CASCADE
-- 제공 `tests_v5.sql`과 `tests_concurrency.sh` 원본 실행. 셸 스크립트는 임시 복사본의 줄바꿈만 LF로 정규화
+- `scripts/db/tests_v5.sql`과 `scripts/db/tests_concurrency.sh` 실행. 셸 스크립트는 임시 복사본의 줄바꿈만 LF로 정규화
 - local 프로필의 API 계정 연결·JPA 초기화·HTTP 기동 및 기존 health 응답 확인
 
 상세 보고서는 Git 제외 경로 `build/db-verification/<고유 컨테이너 이름>/`에 남는다.
 기존 HTTP/컨텍스트 테스트는 test 리소스에서 DB 자동 구성만 제외해 DB 없이 실행하며,
 공통 응답·Swagger·prod 동작 검증은 유지한다. H2로 PostGIS 동작을 대체하지 않는다.
 
-### V1~V4 초기 구현에서 실행한 결과
+### 검증 결과의 위치
 
-2026-11-03, Windows/Java 21에서 다음을 확인했다.
+V5의 데이터 이관·제약·원문 보호 결과는 [주차장 가이드](PARKING_LOTS_V5.md),
+부모 환경 보존·미끼 DB 불변·사전 연결 확인 결과는 [연결 격리 가이드](VERIFICATION_ISOLATION.md)에 기록한다.
+V1~V4 초기 검증 수치는 현재 V5 수치와 혼동되지 않도록 이 가이드에 중복 기재하지 않는다.
+기존 JUnit 검증은 35개이며, DB SQL 회귀는 36개와 동시성 C1/C2를 유지한다.
+개발 DB·볼륨에 적용하거나 실제 IDE 실행 구성을 조작하지 않고, 격리 DB에서 local 프로필로 기동을 확인한다.
 
-| 항목 | 결과 |
-| --- | --- |
-| `test bootJar` | 기존 테스트 35개, 실패 0; 실행 JAR 생성 성공 |
-| 실제 DB | PostgreSQL 16.15 / PostGIS 3.6.4 (`postgis/postgis:16-3.6`) |
-| 빈 DB / 재실행 | V1~V4 적용 성공 / `No migration necessary` |
-| 카탈로그 | 업무 테이블 25, CHECK 33, FK 37, PK 25, UNIQUE 제약 7, 함수 11, 트리거 8 확인 |
-| 인덱스·권한·보충 도메인 검사 | 모두 통과; API/마이그레이션 각각 SCRAM 비밀번호 인증으로 연결 |
-| 제공 SQL 회귀 테스트 | 36 PASS, 0 FAIL |
-| 동시성 | C1·C2 모두 PASS; 실제 Lock 대기 확인 |
-| local HTTP | API 계정으로 JPA 초기화 및 `/api/v1/health` 정상 응답 |
-
-최종 상세 로그는 `build/db-verification/parking-flyway-verify-0cc4913ccc/`에 있다.
-기존 개발 DB·볼륨은 변경하지 않았다. 실제 IDE 실행 구성 조작과 개발 DB에의 적용은
-실행하지 않았으며, 동일 local 프로필의 빌드 JAR로 기동을 검증했다.
+2026-11-03 문서/참고 파일 정리 후에도 전체 연결 격리 하네스를 실행했다.
+오염 환경과 정상 환경 모두 V1~V5 적용·이관·재실행·원문 보호·SQL 36개·동시성 C1/C2·HTTP 기동을 통과했고,
+부모 환경과 미끼 DB도 보존됐다. 결과는 `build/db-verification/parking-decoy-5800b45fac/results.json`에 있다.
+`test bootJar`는 성공했으며 JUnit 35개는 변경이 없어 Gradle의 기존 성공 결과(UP-TO-DATE)를 사용했다.
+V1~V5 SHA-256은 정리 전후 동일하고, 회귀 SQL 본문과 동시성 스크립트도 보존했다.
 
 ## 후속 작업과 미결사항
 

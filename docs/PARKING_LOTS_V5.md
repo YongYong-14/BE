@@ -2,21 +2,20 @@
 
 ## 기준과 기존 상태
 
-작업 브랜치는 `feat/7-db-flyway`다. 기존 미커밋 DB/Flyway 작업을 보존했다.
+작업 브랜치는 `feat/7-db-flyway`다. 기존 DB/Flyway 작업과 데이터를 보존했다.
 V4는 `V4__erd_v5_grants.sql`에서 사용하며, 이전 격리 검증 로그에도 V1~V4 성공 이력이 있다.
-개발 Compose DB는 읽기 전용 조회 결과 `flyway.flyway_schema_history`와
-`public.parking_lots`가 아직 없었다. 개발 DB에는 이번 변경을 적용하지 않았다.
+개발 DB의 현재 적용 이력은 실행 전에 별도 확인한다. 아래 검증은 격리 DB에서 수행하며,
+개발 DB에 자동 적용하지 않는다.
 
-참고 원본은 다음 세 파일이며 같은 이름의 중복 파일은 없었다.
+현재 기준 파일은 다음과 같다.
 
-- `docs/reference/V4__parking_lots_hours_and_fee.sql`
-- `docs/reference/yongin_parking_erd_v5.1.dbml`
+- `src/main/resources/db/migration/`의 V1~V5 적용 SQL
+- `docs/schema/yongin_parking_erd_v5.1.dbml`
 - `docs/reference/용인 불법주정차 알림 — API 명세 v0.6 ERD v5.1 기준.docx`
 
-참고 SQL의 V4는 예시 번호다. 프로젝트 적용 파일은
-`src/main/resources/db/migration/V5__parking_lots_hours_and_fee.sql`이며 V1~V4는 변경하지 않았다.
-참고 SQL은 V1~V3가 테이블/가드/권한이라는 전제지만 실제 프로젝트에서는 V2~V4가 그 역할을 한다.
-V5는 이 차이를 반영한 헤더와 public search_path를 사용한다.
+주차장 적용 파일은 `src/main/resources/db/migration/V5__parking_lots_hours_and_fee.sql`이다.
+V4는 권한 설정에 사용되므로 주차장 변경은 V5를 사용한다.
+중복 참고 SQL·DBML은 정리했고 기존 V1~V5의 내용은 변경하지 않았다.
 
 ## 변경과 SQL / DBML 일치
 
@@ -32,12 +31,11 @@ V5는 이 차이를 반영한 헤더와 public search_path를 사용한다.
 | `ck_pl_saturday_pair` | `(saturday_open IS NULL) = (saturday_close IS NULL)` |
 | `ck_pl_holiday_pair` | `(holiday_open IS NULL) = (holiday_close IS NULL)` |
 
-최신 참고 DBML에는 요금 CHECK만 있고 시간 쌍 CHECK 3개가 빠져 있었다.
-참고 파일을 수정하지 않고 `docs/schema/yongin_parking_erd_v5.1.dbml`을 프로젝트 사본으로 만들었다.
-이 사본의 parking_lots에 CHECK 3개를 보완하고, 일요일 공용을 임시 정책으로 명시했다.
-DBML로 전체 스키마를 재생성하지 않았다. 기존 ERD v5 SQL은 변경 전 기준으로 보존한다.
+`docs/schema/yongin_parking_erd_v5.1.dbml`은 요금 CHECK와 시간 쌍 CHECK 3개를 모두 포함한다.
+일요일 공용은 임시 정책으로 명시했다. DBML로 전체 스키마를 재생성하지 않으며,
+변경 전 스키마는 기존 V1~V4 마이그레이션으로 보존한다.
 
-참고 SQL의 DDL/이관/CHECK는 유지했다. 프로젝트 파일에는 데이터 검사 전
+V5는 DDL/이관/CHECK를 한 파일에서 실행한다. 데이터 검사 전
 `LOCK TABLE public.parking_lots IN ACCESS EXCLUSIVE MODE`를 추가했다.
 검사와 컬럼 삭제 사이에 다른 세션이 운영시간을 기록하는 경쟁을 막는다.
 이 잠금은 읽기/쓰기와 충돌하므로 실제 적용은 짧은 유지보수 구간에 수행한다.
