@@ -1,0 +1,631 @@
+// Canonical ERD v5.1. Executable schema: src/main/resources/db/migration/ (V1-V5).
+Project yongin_parking {
+  database_type: 'PostgreSQL'
+  Note: '''
+  # 용인 불법주정차 알림 — ERD v5.1 (API v0.6, 2026-11-03)
+
+  ## 설계 기준
+  - 거리·포함 판정 컬럼은 전부 geography(4326) → ST_DWithin 결과가 미터 단위
+  - 격자 계산만 EPSG:5186에서 floor(x/cell), floor(y/cell)
+  - 1단계 = 규칙층(zone_rules 법정 거리) 확정만. 모델은 2단계까지
+  - 알림 발송 여부는 서버가 판정. 앱은 결과대로 로컬 알림 표시 후 별도 요청으로 표시 결과 보고
+  - 베이스라인(격자 과거 평균)도 prediction_versions의 한 버전 → 서빙 경로 1개
+  - Asia/Seoul 기준. weekday 1=월~7=일. time_slot 0~7(3시간)
+  - 공휴일 → 일요일(7) 치환을 집계·학습·서빙 모두에 동일 적용 (weekday 컬럼은 치환 후 값)
+  - 시민 신고 = 안전신문고 + 새올민원. 관측 기간은 source_availability로 유형별 관리
+  - 탈퇴 = 하드 삭제. 사용자 하위 데이터 전부 CASCADE (위치정보법 제24조 제4항: 동의 철회 시 개인위치정보·확인자료 지체 없이 파기)
+  - 단, 주차 기록만 정리할 때는 위치 로그를 지우지 않음(SET NULL). 위치 동의만 철회한 경우는 서비스 로직에서 파기
+  - 9월 26일은 기록 완전성이 의심되어 분석에서 제외하고, 관측 종료일을 9월 25일로 설정 (26일 110건 vs 9월 금요일 평균 192건, 19시 이후 기록 없음)
+
+  ## DBML 밖 객체 → src/main/resources/db/migration/V3__erd_v5_guards_and_indexes.sql
+  - GIST 인덱스 6개, 부분 유니크 3개(활성 차량·활성 예측 버전·원천별 활성 import)
+  - 예측 버전 수명주기: 적재 중(frozen_at NULL) → freeze(실제 행 대조 후 동결) → activate(동결된 것 중 선택)
+    · 동결된 버전은 대상 격자·예측 행·설정값 INSERT/UPDATE/DELETE 전부 차단 (활성 여부와 무관)
+    · 수정이 필요하면 새 버전 생성. 삭제는 purge 함수로만(비활성 + 판정 미참조)
+    · purge 판별은 설정값이 아니라 실행 역할: SECURITY DEFINER 함수 소유자로 실행될 때만 허용
+    · 역할 분리(scripts/db/bootstrap.sql + src/main/resources/db/migration/V4__erd_v5_grants.sql): app(API 서버) / etl(적재·동결·활성화) / admin(정리). 소유자 계정으로 앱 접속 금지
+    · 동시성: 자식 변경은 부모 버전 행 FOR SHARE, 동결·활성화는 FOR UPDATE → 서로 직렬화
+  - 규칙 묶음 수명주기: 작성 중 → publish → 판정에 사용. 공개된 묶음은 규칙 추가·수정·삭제 차단
+  - 판정은 공개된 규칙 묶음·동결된 예측 버전만 참조 가능(트리거)
+  - 성공한 판정은 근거 필수: 규칙 묶음 참조(CHECK), 모델 조회 OK면 모델 버전 참조(CHECK),
+    1·2단계는 대표 근거(rank 1) 행 필수 — 1단계 FACILITY_RULE, 2단계 MODEL/REPORT_HISTORY (커밋 시점 지연 검사)
+
+  ## 애플리케이션이 보장할 것 (DB 제약만으로 불가)
+  - 가입 트랜잭션에서 notification_settings 행 생성
+  - 주차 이벤트 생성 시 vehicles.deleted_at IS NULL 확인 (복합 FK는 소유자만 보장)
+  - 판정 API: INSERT ... ON CONFLICT (user_id, client_event_id) DO NOTHING → 행 잠금 →
+    request_hash 다르면 409, SUCCEEDED/PARTIAL 판정 있으면 재계산 없이 반환, FAILED만 재시도
+  - 요청 시작 시 활성 prediction_version·rule_version·import를 한 번 읽고 끝까지 고정
+  - 역지오코딩(parking_events.address)은 판정 응답 후 비동기
+  - prediction_versions 활성화 전 완전성 검사: loaded_row_count = target_cell_count × 56
+  - location_access_logs, parking_events 보유기간 만료분 파기 배치
+  '''
+}
+
+// ═════════════════════════════════════════════
+// 계정·인증·동의
+// ═════════════════════════════════════════════
+
+Table users {
+  id uuid [pk]
+  kakao_id bigint [not null, unique]
+  nickname varchar(100)
+  profile_image_url text
+  email varchar(255)
+  last_login_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  Note: '탈퇴(앱 내·웹 요청·카카오 연결 끊기 콜백) 시 하드 삭제. 하위 데이터 CASCADE'
+}
+
+Table refresh_tokens {
+  id uuid [pk]
+  user_id uuid [not null]
+  token_hash varchar(255) [not null, unique]
+  device_info varchar(200)
+  expires_at timestamptz [not null]
+  last_used_at timestamptz
+  revoked_at timestamptz [note: '로그아웃·재사용 탐지 시 설정']
+  family_id uuid [not null, note: '로그인 1회 = 계열 1개. 재사용 탐지 시 계열 전체 폐기']
+  replaced_by_id uuid [unique, note: '로테이션 후속 토큰']
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    user_id
+    family_id
+  }
+}
+
+Table user_agreements {
+  id bigint [pk, increment, note: '같은 시각 이벤트의 순서 = id 순']
+  user_id uuid [not null]
+  agreement_type varchar(30) [not null, note: 'TERMS / PRIVACY / LOCATION_SERVICE']
+  version varchar(20) [not null, note: '동의·철회 대상 약관 문서 버전']
+  action varchar(10) [not null, note: 'AGREE / WITHDRAW']
+  occurred_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (user_id, agreement_type, id)
+  }
+
+  checks {
+    `agreement_type IN ('TERMS','PRIVACY','LOCATION_SERVICE')` [name: 'ck_agreement_type']
+    `action IN ('AGREE','WITHDRAW')` [name: 'ck_agreement_action']
+  }
+
+  Note: '이벤트 로그. 현재 상태 = 유형별 id 최댓값 이벤트. 위치기반서비스 WITHDRAW 시 위치 데이터 파기 처리'
+}
+
+// ═════════════════════════════════════════════
+// 차량·설정
+// ═════════════════════════════════════════════
+
+Table vehicles {
+  id uuid [pk]
+  user_id uuid [not null]
+  name varchar(100) [not null]
+  bluetooth_address varchar(17) [not null]
+  device_type varchar(50)
+  deleted_at timestamptz [note: '차량 변경 시 소프트 삭제 후 새 행']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    user_id
+    (id, user_id) [unique, note: 'parking_events 복합 FK 대상']
+  }
+
+  Note: '활성 차량 1대 = 부분 유니크 (user_id) WHERE deleted_at IS NULL'
+}
+
+Table notification_settings {
+  user_id uuid [pk]
+  caution_enabled boolean [not null, default: true, note: '2단계 주의 알림']
+  night_enabled boolean [not null, default: false, note: '22~07시 2단계 알림 허용']
+  updated_at timestamptz [not null, default: `now()`]
+
+  Note: '가입 시 생성. 1단계는 해제 불가라 컬럼 없음'
+}
+
+// ═════════════════════════════════════════════
+// 주차 감지·판정
+// ═════════════════════════════════════════════
+
+Table parking_events {
+  id uuid [pk]
+  user_id uuid [not null]
+  vehicle_id uuid [not null]
+  client_event_id uuid [not null, note: '앱 생성 멱등키']
+  request_hash varchar(64) [not null, note: '요청 본문 해시. 같은 키·다른 본문 = 409']
+  vehicle_name_snapshot varchar(100) [not null]
+  detected_at timestamptz [not null, note: '블루투스 해제 시각 = 판정 기준 시각']
+  confirmed_at timestamptz [not null]
+  last_known_location geography(Point,4326) [note: '해제 직전 마지막 좌표']
+  last_known_at timestamptz
+  original_location geography(Point,4326) [note: '해제 후 측위 좌표. 미수신 시 null']
+  accuracy_m float8
+  remeasure_count smallint [not null, default: 0, note: 'GPS 재측위 횟수(판정 재시도와 무관)']
+  confirmed_location geography(Point,4326) [not null]
+  confirmation_method varchar(20) [not null, note: 'CONFIRMED / ADJUSTED / AUTO']
+  address text [note: '비동기 역지오코딩']
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (user_id, client_event_id) [unique]
+    (user_id, detected_at)
+  }
+
+  checks {
+    `confirmation_method IN ('CONFIRMED','ADJUSTED','AUTO')` [name: 'ck_pe_method']
+    `COALESCE(original_location, last_known_location) IS NULL OR ST_DWithin(COALESCE(original_location, last_known_location), confirmed_location, 200)` [name: 'ck_pe_adjust_200m']
+    `last_known_location IS NULL OR last_known_at IS NOT NULL` [name: 'ck_pe_last_known_at']
+    `confirmed_at >= detected_at` [name: 'ck_pe_time_order']
+    `original_location IS NOT NULL OR confirmation_method <> 'AUTO'` [name: 'ck_pe_no_auto_without_gps']
+  }
+
+  Note: '기준점(original, 없으면 last_known)에서 200m 이내만 허용. GPS 미수신(original NULL)이면 30초 자동 확정 금지 → 사용자가 직접 확정. 두 기준점 모두 없으면 거리 제한 없음(기획 확정 필요)'
+}
+
+Table risk_assessments {
+  id uuid [pk]
+  parking_event_id uuid [not null, unique]
+  status varchar(20) [not null, note: 'SUCCEEDED / PARTIAL(규칙 미해당 + 모델 결과 없음) / FAILED']
+  level smallint [note: 'SUCCEEDED일 때만. 1 위험 / 2 주의 / 3 해당 없음']
+  prediction_status varchar(20) [note: 'OK / SKIPPED(1단계 확정) / NOT_TARGET / OUT_OF_AREA / NO_ACTIVE_VERSION / MISSING_ROW(대상인데 행 없음 = 장애)']
+  primary_zone_type varchar(30)
+  attempt_count smallint [not null, default: 1, note: '서버 판정 시도 횟수. FAILED 후 1회만 재시도']
+
+  // 판정 입력 스냅샷
+  reference_time timestamptz
+  weekday_actual smallint
+  weekday smallint [note: '공휴일 치환 후 조회에 쓴 값']
+  time_slot smallint
+  is_holiday boolean
+  grid_id bigint
+  zone_rule_set varchar(30) [note: 'zone_rules.rule_set']
+  prediction_version_id uuid
+  source_import_id uuid [note: '신고 건수·통계에 쓴 원천 import']
+
+  // 결과값
+  report_count integer [note: '반경 내 시민 신고 행 수']
+  event_group_count integer [note: '반경 내 중복 후보 그룹 수']
+  report_count_radius_m integer
+  report_period_start date
+  report_period_end date
+  predicted_count float8 [note: '격자 smoothed λ']
+  top_percent float8
+  reference_fine_amount integer
+
+  // 알림
+  notify_decision varchar(30) [note: 'SEND / SUPPRESSED_NIGHT / SUPPRESSED_SETTING / NONE']
+  message_title varchar(200)
+  message_body text [note: '고정 템플릿 + 코드가 채운 숫자']
+  delivered_at timestamptz [note: '앱이 표시 후 별도 요청으로 보고. 응답 전송 시각 아님']
+  delivery_failure varchar(30) [note: 'NO_PERMISSION 등']
+
+  error_code varchar(100)
+  evaluated_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  checks {
+    `status IS NOT NULL AND status IN ('SUCCEEDED','PARTIAL','FAILED')` [name: 'ck_ra_status']
+    `(status = 'SUCCEEDED' AND level IS NOT NULL AND level IN (1,2,3)) OR (status IN ('PARTIAL','FAILED') AND level IS NULL)` [name: 'ck_ra_level']
+    `status = 'SUCCEEDED' OR notify_decision IS NULL OR notify_decision = 'NONE'` [name: 'ck_ra_notify_only_success']
+    `prediction_status IS NULL OR prediction_status IN ('OK','SKIPPED','NOT_TARGET','OUT_OF_AREA','NO_ACTIVE_VERSION','MISSING_ROW')` [name: 'ck_ra_pred_status']
+    `status <> 'SUCCEEDED' OR (prediction_status IS NOT NULL AND prediction_status IN ('OK','SKIPPED'))` [name: 'ck_ra_success_pred']
+    `status <> 'PARTIAL' OR (prediction_status IS NOT NULL AND prediction_status IN ('NOT_TARGET','OUT_OF_AREA','NO_ACTIVE_VERSION'))` [name: 'ck_ra_partial']
+    `prediction_status IS NULL OR prediction_status <> 'MISSING_ROW' OR status = 'FAILED'` [name: 'ck_ra_missing_is_failure']
+    `notify_decision IS NULL OR notify_decision IN ('SEND','SUPPRESSED_NIGHT','SUPPRESSED_SETTING','NONE')` [name: 'ck_ra_notify']
+    `status NOT IN ('SUCCEEDED','PARTIAL') OR zone_rule_set IS NOT NULL` [name: 'ck_ra_rule_ref_required']
+    `status <> 'SUCCEEDED' OR prediction_status <> 'OK' OR prediction_version_id IS NOT NULL` [name: 'ck_ra_model_ref_required']
+    `status <> 'SUCCEEDED' OR ((level = 1) = (prediction_status = 'SKIPPED'))` [name: 'ck_ra_level1_iff_skipped']
+    `weekday IS NULL OR weekday BETWEEN 1 AND 7` [name: 'ck_ra_weekday']
+    `weekday_actual IS NULL OR weekday_actual BETWEEN 1 AND 7` [name: 'ck_ra_weekday_actual']
+    `time_slot IS NULL OR time_slot BETWEEN 0 AND 7` [name: 'ck_ra_slot']
+    `attempt_count BETWEEN 1 AND 2` [name: 'ck_ra_attempt']
+  }
+
+  Note: '''
+  PARTIAL = 규칙층 미해당 + 모델 대상 아님(용인 밖·비대상 격자·활성 버전 없음) → "판단할 수 없음" 안내.
+  MISSING_ROW = 대상 격자인데 예측 행 없음 → 운영 장애이므로 FAILED + 경보. PARTIAL로 숨기지 않음.
+  예측 행이 없다고 자동 3단계로 처리하지 않음.
+  FAILED → 재시도 시 결과·근거·알림 필드를 전부 갱신(근거는 같은 트랜잭션에서 교체).
+  '''
+}
+
+Table assessment_reasons {
+  id uuid [pk]
+  assessment_id uuid [not null]
+  rank smallint [not null, note: '1 = 대표 근거']
+  reason_type varchar(30) [not null, note: 'FACILITY_RULE / REPORT_HISTORY / MODEL']
+  zone_type varchar(30)
+  facility_id uuid
+  distance_m float8
+  threshold_m float8
+  accuracy_margin_m float8
+  description text [not null]
+
+  indexes {
+    (assessment_id, rank) [unique]
+  }
+
+  checks {
+    `reason_type IN ('FACILITY_RULE','REPORT_HISTORY','MODEL')` [name: 'ck_ar_type']
+  }
+}
+
+Table location_access_logs {
+  id bigint [pk, increment]
+  user_id uuid [not null]
+  parking_event_id uuid
+  action varchar(20) [not null, note: 'COLLECT / USE / PROVIDE / DELETE']
+  purpose varchar(100) [not null]
+  collection_method varchar(50) [note: '예: 단말 GPS']
+  recipient varchar(100) [note: '제3자 제공 시 제공받는 자. MVP는 없음']
+  accessed_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (user_id, accessed_at)
+  }
+
+  Note: '''
+  위치정보법 제16조 제2항 이용·제공사실 확인자료. 6개월 이상 보관 후 파기 배치.
+  탈퇴·위치 동의 철회 시 CASCADE로 함께 파기(제24조 제4항).
+  필요 기록 항목·사업자 신고 의무 해당 여부는 확인 필요.
+  '''
+}
+
+// ═════════════════════════════════════════════
+// 판정 규칙·참조 데이터
+// ═════════════════════════════════════════════
+
+Table zone_types {
+  zone_type varchar(30) [pk, note: 'CROSSWALK / INTERSECTION / HYDRANT / BUS_STOP / SCHOOL_ZONE / SIDEWALK / OTHER']
+  label varchar(50) [not null]
+  has_facility_data boolean [not null, note: 'false면 규칙층 판정 불가(현재 INTERSECTION·SIDEWALK 등). 신고 이력·모델로만 안내']
+}
+
+Table zone_rule_sets {
+  rule_set varchar(30) [pk]
+  published_at timestamptz [note: 'NULL = 작성 중. 공개 후 규칙 추가·수정·삭제 불가, 판정은 공개된 묶음만 참조']
+  description text
+  created_at timestamptz [not null, default: `now()`]
+}
+
+Table zone_rules {
+  id uuid [pk]
+  rule_set varchar(30) [not null]
+  zone_type varchar(30) [not null]
+  geometry_rule varchar(10) [not null, note: 'DISTANCE(거리 이내) / COVERS(면 포함)']
+  legal_distance_m float8
+  fine_amount_car integer
+  fine_condition text
+  message_template_title varchar(200)
+  message_template_body text
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (rule_set, zone_type) [unique]
+  }
+
+  checks {
+    `geometry_rule IN ('DISTANCE','COVERS')` [name: 'ck_zr_geom']
+    `geometry_rule <> 'DISTANCE' OR legal_distance_m IS NOT NULL` [name: 'ck_zr_distance']
+  }
+
+  Note: '공개된 rule_set의 행은 INSERT/UPDATE/DELETE 모두 차단. 규칙 변경 = 새 rule_set'
+}
+
+Table facilities {
+  id uuid [pk]
+  import_id uuid [not null]
+  source_record_key varchar(150) [not null]
+  zone_type varchar(30) [not null]
+  name varchar(200)
+  spatial_data geography(Geometry,4326) [not null, note: '적재 시 ST_IsValid 검증']
+  attributes jsonb
+  source_date date
+  imported_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (import_id, source_record_key) [unique]
+    zone_type
+  }
+
+  Note: '조회는 활성 import만'
+}
+
+Table parking_lots {
+  id uuid [pk]
+  import_id uuid [not null]
+  source_record_key varchar(150) [not null]
+  name varchar(200) [not null]
+  address text
+  location geography(Point,4326) [not null]
+  parking_type varchar(50)
+  fee_type varchar(10) [note: 'FREE / PAID / MIXED. NULL = 원천에 없음']
+  fee_info text
+  weekday_open time
+  weekday_close time
+  saturday_open time
+  saturday_close time
+  holiday_open time [note: '공휴일 운영시간. 일요일 공용은 원천 정의 확인 전 임시 정책. 시작/종료는 둘 다 있거나 둘 다 NULL']
+  holiday_close time
+  capacity integer
+  source_date date
+  imported_at timestamptz [not null, default: `now()`]
+  indexes { (import_id, source_record_key) [unique] }
+  checks {
+    `fee_type IS NULL OR fee_type IN ('FREE','PAID','MIXED')` [name: 'ck_pl_fee_type']
+    `(weekday_open IS NULL) = (weekday_close IS NULL)` [name: 'ck_pl_weekday_pair']
+    `(saturday_open IS NULL) = (saturday_close IS NULL)` [name: 'ck_pl_saturday_pair']
+    `(holiday_open IS NULL) = (holiday_close IS NULL)` [name: 'ck_pl_holiday_pair']
+  }
+}
+
+Table holidays {
+  holiday_date date [pk]
+  name varchar(50) [not null]
+}
+
+Table data_imports {
+  id uuid [pk]
+  source_dataset varchar(150) [not null]
+  file_name varchar(255) [not null]
+  file_hash varchar(64) [not null, unique, note: '같은 파일 재적재 방지']
+  source_reference_date date
+  active boolean [not null, default: false, note: '원천별 1개만 활성(부분 유니크)']
+  total_rows integer
+  loaded_rows integer
+  parse_failed_rows integer
+  geocode_succeeded integer
+  geocode_failed integer
+  note text
+  imported_at timestamptz [not null, default: `now()`]
+}
+
+Table source_availability {
+  import_id uuid [not null]
+  record_category varchar(30) [not null, note: '단속구분 값 또는 CITIZEN_REPORT 같은 묶음']
+  observed_start date [not null]
+  observed_end date [not null, note: '이 날짜까지 완전 관측. 시민 신고는 2025-09-25 (26일 당일 완전성 미확인)']
+  note text
+
+  indexes {
+    (import_id, record_category) [pk]
+  }
+
+  Note: '노출 일수(day_count)·학습 기간은 이 범위로만 계산. CCTV 기간을 시민 신고에 쓰지 않음'
+}
+
+// ═════════════════════════════════════════════
+// 단속·신고 원천 및 지오코딩
+// ═════════════════════════════════════════════
+
+Table geocoded_parcels {
+  id uuid [pk]
+  parcel_key varchar(150) [not null, unique, note: '구 + 동(읍면 리) + 산 + 지번']
+  location geography(Point,4326)
+  match_level varchar(20) [note: 'PARCEL / ROAD / ADMIN. ADMIN은 학습·집계 제외']
+  status varchar(20) [not null, note: 'PENDING / SUCCEEDED / FAILED / AMBIGUOUS']
+  first_attempt_status varchar(20)
+  normalization_method varchar(20) [note: 'NONE / RULE / LLM']
+  normalized_address text
+  provider varchar(30)
+  failure_reason text
+  geocoded_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+}
+
+Table enforcement_records {
+  id bigint [pk, increment]
+  import_id uuid [not null]
+  source_row_no integer [not null]
+  enforced_at timestamptz [not null]
+  enforcement_type varchar(30) [not null, note: '고정형CCTV / 주행형CCTV / 안전신문고 / 새올민원 / 수기보행등록']
+  is_citizen_report boolean [not null]
+  district varchar(20)
+  place_raw text [not null]
+  parse_status varchar(20) [not null, note: 'PARSED / FAILED / ROAD_ONLY']
+  parcel_id uuid
+  violation_type varchar(30) [note: '키워드 다중 일치 시 우선순위: 어린이보호구역 > 소화전 > 횡단보도 > 교차로 > 버스정류소 > 인도 > 기타']
+  violation_type_multi boolean [not null, default: false, note: '키워드 2개 이상 일치']
+  parser_version varchar(20) [not null]
+  location geography(Point,4326) [note: '지오코딩 좌표 복사']
+  location_precision varchar(20) [note: 'PARCEL / ROAD / ADMIN / NONE']
+  grid_id bigint
+  event_group_key varchar(200) [note: '분 단위 시각 + 지번. 중복 "후보" 그룹 — 신고 1회로 확정하지 않음']
+  is_exact_duplicate boolean [not null, default: false]
+
+  indexes {
+    (import_id, source_row_no) [unique]
+    (is_citizen_report, enforced_at)
+    grid_id
+    parcel_id
+    event_group_key
+  }
+
+  Note: '원본 전량 보존. 행 수 vs 그룹 수 타깃은 비교 실험 후 prediction_versions.target_definition으로 확정'
+}
+
+Table parcel_report_stats {
+  import_id uuid [not null, note: '통계를 만든 원천 import']
+  parcel_id uuid [not null]
+  location geography(Point,4326) [not null, note: '통계 생성 시점 좌표 스냅샷. geocoded_parcels 좌표가 바뀌어도 고정']
+  period_start date [not null]
+  period_end date [not null]
+  report_count integer [not null]
+  event_group_count integer [not null]
+  count_by_violation_type jsonb
+
+  indexes {
+    (import_id, parcel_id, period_start, period_end) [pk]
+  }
+
+  Note: '판정 시 "반경 내 신고 N건" = 이 테이블 location 기준 합산(지번 약 5,700점). 좌표 수정 시 새 import로 통계·집계·예측 재생성'
+}
+
+// ═════════════════════════════════════════════
+// 격자·집계·예측
+// ═════════════════════════════════════════════
+
+Table spatial_grids {
+  id bigint [pk, increment]
+  projected_srid integer [not null, default: 5186]
+  cell_size_m integer [not null, default: 50]
+  grid_x integer [not null]
+  grid_y integer [not null]
+  in_model_area boolean [not null, default: true, note: '용인시 경계 내']
+  boundary geometry(Polygon,4326) [not null, note: '표시용']
+
+  indexes {
+    (projected_srid, cell_size_m, grid_x, grid_y) [unique]
+  }
+}
+
+Table report_aggregates {
+  import_id uuid [not null]
+  grid_id bigint [not null]
+  weekday smallint [not null, note: '공휴일 치환 후']
+  time_slot smallint [not null]
+  period_start date [not null]
+  period_end date [not null]
+  day_count smallint [not null, note: 'source_availability 범위 내 해당 요일 일수']
+  report_count integer [not null]
+  event_group_count integer [not null]
+  count_by_violation_type jsonb
+  generated_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (import_id, grid_id, weekday, time_slot, period_start, period_end) [pk]
+  }
+
+  checks {
+    `weekday BETWEEN 1 AND 7` [name: 'ck_rag_weekday']
+    `time_slot BETWEEN 0 AND 7` [name: 'ck_rag_slot']
+  }
+
+  Note: 'EDA·피처용 희소 저장(0건 미저장). 학습 시에는 대상 격자 × 관측 기간 전체 조합을 생성해 0을 채운 뒤 사용'
+}
+
+Table prediction_versions {
+  id uuid [pk]
+  model_type varchar(30) [not null, note: 'BASELINE_MEAN / LGBM_POISSON']
+  model_version varchar(100) [not null, unique]
+  training_start date [not null]
+  training_end date [not null]
+  validation_start date
+  validation_end date
+  target_definition varchar(30) [not null, note: 'ROW_COUNT / EVENT_GROUP_COUNT']
+  source_import_id uuid [not null, note: '학습·통계 원천']
+  observed_end date [not null, note: '학습에 쓴 관측 종료일']
+  holiday_policy varchar(20) [not null, default: 'AS_SUNDAY', note: 'AS_SUNDAY / NONE. 비교 실험 후 확정']
+  projected_srid integer [not null, default: 5186]
+  cell_size_m integer [not null, default: 50]
+  smoothing_radius_m integer [not null, note: '격자 중심 기준 근사. 임의 좌표 반경 아님']
+  percentile_basis varchar(20) [not null, note: 'SAME_SLOT / GLOBAL']
+  tie_method varchar(20) [not null, default: 'GE_SHARE', note: 'top_percent = 100 × (값 ≥ 자신인 셀 수) / 모집단. 동점 많으면 2단계가 0개일 수 있음(팀 합의 필요)']
+  caution_top_percent float8 [not null, default: 10]
+  target_cell_count integer [not null, note: '예측 대상 격자 수']
+  loaded_row_count integer [not null, default: 0, note: 'activate 함수가 실제 행을 세어 기록']
+  validated_at timestamptz
+  frozen_at timestamptz [note: 'NULL = 적재 중. 동결 후 이 행(active 제외)과 대상·예측 행 전부 변경 불가']
+  metrics jsonb
+  baseline_version_id uuid
+  active boolean [not null, default: false]
+  description text
+  generated_at timestamptz [not null, default: `now()`]
+
+  checks {
+    `target_cell_count > 0` [name: 'ck_pv_target_positive']
+    `loaded_row_count >= 0` [name: 'ck_pv_loaded_nonneg']
+    `frozen_at IS NULL OR (validated_at IS NOT NULL AND loaded_row_count = target_cell_count::bigint * 56)` [name: 'ck_pv_complete_when_frozen']
+    `NOT active OR frozen_at IS NOT NULL` [name: 'ck_pv_active_requires_frozen']
+  }
+
+  Note: 'freeze_prediction_version() → activate_prediction_version() 순서. frozen_at 전환 시 트리거가 실제 행을 대조하므로 직접 UPDATE로도 우회 불가'
+}
+
+Table prediction_target_grids {
+  version_id uuid [not null]
+  grid_id bigint [not null]
+
+  indexes {
+    (version_id, grid_id) [pk]
+  }
+
+  Note: '버전별 예측 대상 격자 목록. 목록에 있는데 예측 행 없음 = MISSING_ROW, 목록에 없음 = NOT_TARGET'
+}
+
+Table risk_predictions {
+  version_id uuid [not null]
+  grid_id bigint [not null]
+  weekday smallint [not null]
+  time_slot smallint [not null]
+  expected_count float8 [not null]
+  smoothed_count float8 [not null]
+  top_percent float8 [not null]
+
+  indexes {
+    (version_id, grid_id, weekday, time_slot) [pk]
+  }
+
+  checks {
+    `weekday BETWEEN 1 AND 7` [name: 'ck_rp_weekday']
+    `time_slot BETWEEN 0 AND 7` [name: 'ck_rp_slot']
+  }
+
+  Note: '대상 격자만 적재 가능(복합 FK). 56조합 전부 저장(0 포함). 2단계 = top_percent ≤ caution_top_percent'
+}
+
+// ═════════════════════════════════════════════
+// 관계 — 자식.FK > 부모.PK (1:1도 자식 쪽 UNIQUE/PK로 보장)
+// ═════════════════════════════════════════════
+
+Ref: refresh_tokens.user_id > users.id [delete: cascade]
+Ref: refresh_tokens.replaced_by_id > refresh_tokens.id [delete: set null]
+Ref: user_agreements.user_id > users.id [delete: cascade]
+Ref: vehicles.user_id > users.id [delete: cascade]
+Ref: notification_settings.user_id > users.id [delete: cascade]
+
+Ref: parking_events.user_id > users.id [delete: cascade]
+Ref: parking_events.(vehicle_id, user_id) > vehicles.(id, user_id) [delete: cascade]
+Ref: risk_assessments.parking_event_id > parking_events.id [delete: cascade]
+Ref: risk_assessments.prediction_version_id > prediction_versions.id
+Ref: risk_assessments.grid_id > spatial_grids.id
+Ref: risk_assessments.primary_zone_type > zone_types.zone_type
+
+Ref: assessment_reasons.assessment_id > risk_assessments.id [delete: cascade]
+Ref: assessment_reasons.facility_id > facilities.id [delete: set null]
+Ref: assessment_reasons.zone_type > zone_types.zone_type
+
+Ref: location_access_logs.user_id > users.id [delete: cascade]
+Ref: location_access_logs.parking_event_id > parking_events.id [delete: set null]
+
+Ref: zone_rules.zone_type > zone_types.zone_type
+Ref: zone_rules.rule_set > zone_rule_sets.rule_set
+Ref: risk_assessments.zone_rule_set > zone_rule_sets.rule_set
+Ref: risk_assessments.source_import_id > data_imports.id
+Ref: facilities.zone_type > zone_types.zone_type
+Ref: facilities.import_id > data_imports.id
+Ref: parking_lots.import_id > data_imports.id
+Ref: source_availability.import_id > data_imports.id [delete: cascade]
+
+Ref: enforcement_records.import_id > data_imports.id
+Ref: enforcement_records.parcel_id > geocoded_parcels.id
+Ref: enforcement_records.grid_id > spatial_grids.id
+Ref: enforcement_records.violation_type > zone_types.zone_type
+Ref: parcel_report_stats.parcel_id > geocoded_parcels.id [delete: cascade]
+Ref: parcel_report_stats.import_id > data_imports.id [delete: cascade]
+Ref: report_aggregates.import_id > data_imports.id [delete: cascade]
+
+Ref: report_aggregates.grid_id > spatial_grids.id
+
+Ref: prediction_versions.baseline_version_id > prediction_versions.id
+Ref: prediction_versions.source_import_id > data_imports.id
+Ref: prediction_target_grids.version_id > prediction_versions.id [delete: cascade]
+Ref: prediction_target_grids.grid_id > spatial_grids.id
+Ref: risk_predictions.(version_id, grid_id) > prediction_target_grids.(version_id, grid_id) [delete: cascade]

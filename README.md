@@ -55,3 +55,9 @@
 - `fix: 주차장 조회 오류 수정 (#5)`
 
 ※ 괄호 안 번호는 PR 번호가 아닌 관련 이슈 번호입니다.
+
+## 로컬 데이터베이스
+
+PostgreSQL/PostGIS 최초 실행, IDE 환경변수, Flyway 순서와 격리 검증은 [데이터베이스 가이드](docs/DATABASE.md)를 참고하세요.
+
+적용 SQL은 [Flyway 마이그레이션](src/main/resources/db/migration/), ERD는 [v5.1 DBML](docs/schema/yongin_parking_erd_v5.1.dbml), API 계약은 [v0.6 문서 안내](docs/reference/README.md)를 기준으로 합니다.
