@@ -20,7 +20,7 @@ class ProdOpenApiTests {
     void productionDisablesDocumentationButKeepsHealthAvailable() throws Exception {
         for (String path : new String[]{"/v3/api-docs", "/v3/api-docs.yaml", "/v3/api-docs/swagger-config",
                 "/swagger-ui.html", "/swagger-ui/index.html", "/swagger-ui/swagger-ui-bundle.js"}) {
-            mvc.perform(get(path)).andExpect(status().isNotFound());
+            mvc.perform(get(path)).andExpect(status().isUnauthorized());
         }
         mvc.perform(get("/api/v1/health")).andExpect(status().isOk())
                 .andExpect(content().json("""

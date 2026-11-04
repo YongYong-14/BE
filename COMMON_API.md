@@ -1,6 +1,6 @@
 # 공통 HTTP 응답 사용 규칙
 
-적용 범위는 Spring MVC 컨트롤러 및 MVC 예외 처리 과정이다. Filter와 Spring Security에서 생성하는 응답은 이 처리기를 통과한다고 보장하지 않는다. 해당 계층의 응답 통합은 후속 작업이다.
+Spring MVC 컨트롤러와 MVC 예외 처리기는 아래 응답 계약을 사용한다. Security 필터·인증 진입점·권한 처리기는 MVC 처리기를 거치지 않으므로 `SecurityErrorWriter`에서 같은 `ApiResponse.failure` JSON을 작성한다. 메서드 권한 예외는 MVC 처리기에서 FORBIDDEN으로 매핑한다. 연결 방법은 [인증 가이드](docs/AUTHENTICATION.md)를 따른다.
 
 ## 성공 응답
 
@@ -20,6 +20,7 @@ JSON 본문이 있는 성공 응답은 `ApiResponse.success(data)`를 사용한�
 | --- | --- |
 | 400 | INVALID_INPUT |
 | 401 | UNAUTHORIZED |
+| 401 | TOKEN_EXPIRED (액세스 토큰 만료) |
 | 403 | FORBIDDEN |
 | 404 | NOT_FOUND |
 | 405 | METHOD_NOT_ALLOWED |
