@@ -37,3 +37,29 @@ dependencies {
 tasks.named('test') {
 	useJUnitPlatform()
 }
+
+// Opt-in PostgreSQL verification, following the existing scripts/db isolation workflow.
+// Not attached to test/check/build: normal tests do not require Docker.
+sourceSets {
+	postgresTest {
+		compileClasspath += sourceSets.main.output
+		runtimeClasspath += sourceSets.main.output
+	}
+}
+
+configurations {
+	postgresTestImplementation.extendsFrom testImplementation
+	postgresTestRuntimeOnly.extendsFrom testRuntimeOnly
+	postgresTestCompileOnly.extendsFrom testCompileOnly
+	postgresTestAnnotationProcessor.extendsFrom testAnnotationProcessor
+}
+
+tasks.register('postgresTest', Test) {
+	description = 'Runs auditing tests against an explicitly provisioned isolated PostgreSQL DB.'
+	group = 'verification'
+	testClassesDirs = sourceSets.postgresTest.output.classesDirs
+	classpath = sourceSets.postgresTest.runtimeClasspath
+	useJUnitPlatform()
+	// Always attest and verify the fresh database, even if a prior report exists.
+	outputs.upToDateWhen { false }
+}
