@@ -61,10 +61,10 @@ class OpenApiTests {
             assertThat(media.at("/example/error/code").asText()).isEqualTo(code.getCode());
             assertThat(media.at("/example/error/message").asText()).isEqualTo(code.getMessage());
         }
-        JsonNode actual = mapper.readTree(mvc.perform(post("/api/v1/health"))
-                .andExpect(status().isMethodNotAllowed()).andReturn().getResponse().getContentAsString());
-        JsonNode expected = resolve(doc, responses.path("405")).at("/content/application~1json/example");
-        assertThat(actual).isEqualTo(expected);
+        mvc.perform(post("/api/v1/health")).andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("UNAUTHORIZED"));
+        assertThat(operation.path("security").isMissingNode() || operation.path("security").isEmpty()).isTrue();
+        assertThat(doc.at("/components/securitySchemes/bearerAuth/scheme").asText()).isEqualTo("bearer");
         JsonNode healthActual = mapper.readTree(mvc.perform(get("/api/v1/health"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
         assertThat(healthActual).isEqualTo(responses.path("200").at("/content/application~1json/example"));
