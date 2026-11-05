@@ -3,6 +3,8 @@ package io.github.yongyong14.parking_server.global.exception;
 import org.springframework.http.HttpStatus;
 
 public enum ErrorCode {
+    INVALID_BLUETOOTH_ADDRESS("INVALID_BLUETOOTH_ADDRESS", HttpStatus.BAD_REQUEST, "블루투스 주소 형식을 확인해 주세요."),
+    VEHICLE_CONFLICT("VEHICLE_CONFLICT", HttpStatus.CONFLICT, "차량 정보가 변경되었습니다. 다시 조회한 뒤 재시도해 주세요."),
     INVALID_INPUT("INVALID_INPUT", HttpStatus.BAD_REQUEST, "입력값을 확인해 주세요."),
     UNAUTHORIZED("UNAUTHORIZED", HttpStatus.UNAUTHORIZED, "인증이 필요합니다."),
     TOKEN_EXPIRED("TOKEN_EXPIRED", HttpStatus.UNAUTHORIZED, "토큰이 만료되었습니다."),
