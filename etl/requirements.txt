@@ -1,2 +1,4 @@
 pandas>=2.2
 pytest>=8
+geopandas>=1.0
+psycopg[binary]>=3.1
