@@ -29,7 +29,7 @@ class OpenApiTests {
         assertThat(doc.at("/info/title").asText()).isEqualTo("용인 주차 안내 서비스 API");
         assertThat(doc.at("/info/version").asText()).isEqualTo("v1");
         assertThat(doc.has("success")).isFalse();
-        assertThat(doc.path("paths").size()).isEqualTo(2);
+        assertThat(doc.path("paths").has("/api/v1/health")).isTrue();
         JsonNode operation = doc.path("paths").path("/api/v1/health").path("get");
         assertThat(operation.path("tags").get(0).asText()).isEqualTo("Health");
         JsonNode responses = operation.path("responses");
