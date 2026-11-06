@@ -40,7 +40,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "app.account.terms-versions=terms-v1", "app.account.privacy-versions=privacy-v1",
         "app.account.location-versions=location-v1"
 })
-@EntityScan(basePackageClasses = User.class)
+@EntityScan(basePackageClasses = {User.class, io.github.yongyong14.parking_server.vehicle.Vehicle.class})
 @AutoConfigureMockMvc
 class AccountPostgresTests {
     private static final String BASE = "/api/v1";
@@ -376,6 +376,28 @@ class AccountPostgresTests {
         mvc.perform(get(BASE + "/me").header("Authorization", bearer(second)).param("userId", userId(first).toString()))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data.id").value(userId(second).toString()))
                 .andExpect(jsonPath("$.data.agreements").isEmpty());
+    }
+
+    @Test
+    void loginTokenScopesVehicleApiAndDeletionRevokesVehicleAccess() throws Exception {
+        JsonNode first = login(stubProfile());
+        JsonNode second = login(stubProfile());
+        mvc.perform(put(BASE + "/vehicle").header("Authorization", bearer(first))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"test car\",\"bluetoothAddress\":\"12:34:56:78:9A:BC\"}"))
+                .andExpect(status().isOk());
+        mvc.perform(get(BASE + "/vehicle").header("Authorization", bearer(first)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.vehicle.name").value("test car"));
+        mvc.perform(get(BASE + "/vehicle").header("Authorization", bearer(second)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.vehicle").isEmpty());
+        mvc.perform(get(BASE + "/me").header("Authorization", bearer(first)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.hasVehicle").value(true));
+        mvc.perform(get(BASE + "/vehicle")).andExpect(status().isUnauthorized());
+        mvc.perform(delete(BASE + "/me").header("Authorization", bearer(first)))
+                .andExpect(status().isNoContent());
+        mvc.perform(get(BASE + "/vehicle").header("Authorization", bearer(first)))
+                .andExpect(status().isUnauthorized());
+        assertThat(count("vehicles", userId(first))).isZero();
     }
 
     private long stubProfile() {
