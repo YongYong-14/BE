@@ -91,9 +91,25 @@ def load(cur):
                     AND g.grid_y = t.grid_y AND g.in_model_area""", (CELL,))
     targets = pd.DataFrame(cur.fetchall(), columns=["grid_id", "grid_x", "grid_y"])
 
-    cur.execute("SELECT id FROM prediction_versions WHERE active AND model_type = 'BASELINE_MEAN'")
+    # 평가용 대상 칸: 7/31까지 신고된 지번만으로 뽑는다 (8~9월 위치를 미리 알면 안 됨 → 리뷰 반영)
+    cur.execute("""SELECT DISTINCT ST_X(ST_Transform(e.location::geometry, 5186)), ST_Y(ST_Transform(e.location::geometry, 5186))
+                     FROM enforcement_records e
+                    WHERE e.import_id = %s AND e.is_citizen_report AND e.location IS NOT NULL
+                      AND e.location_precision IN ('PARCEL', 'ROAD')
+                      AND (e.enforced_at AT TIME ZONE 'Asia/Seoul')::date BETWEEN %s AND %s""",
+                (imp, OBS_START, WINDOWS["feat_b"][1]))
+    train_cells = candidate_cells(np.array(cur.fetchall(), dtype=float), TARGET_RADIUS_M)
+    targets_eval = targets[[c in train_cells for c in zip(targets["grid_x"], targets["grid_y"])]].reset_index(drop=True)
+
+    return imp, ev, holidays, targets, targets_eval, latest_baseline_id(cur)
+
+
+def latest_baseline_id(cur):
+    """베이스라인은 LightGBM이 켜지면 꺼지므로 active가 아니라 가장 최근 동결본을 찾는다"""
+    cur.execute("SELECT id FROM prediction_versions WHERE model_type = 'BASELINE_MEAN' AND frozen_at IS NOT NULL "
+                "ORDER BY frozen_at DESC LIMIT 1")
     row = cur.fetchone()
-    return imp, ev, holidays, targets, (row[0] if row else None)
+    return row[0] if row else None
 
 
 def window(ev: pd.DataFrame, name: str) -> pd.DataFrame:
@@ -209,8 +225,9 @@ def with_top_percent(df: pd.DataFrame, col: str) -> pd.Series:
     return 100.0 * ge / n
 
 
-def score(pred: pd.DataFrame, rate_col: str, y: pd.Series, label_days: pd.Series) -> dict:
-    """베이스라인 평가(build_baseline.evaluate)와 같은 지표"""
+def score(pred: pd.DataFrame, rate_col: str, y: pd.Series, label_days: pd.Series, total: float | None = None) -> dict:
+    """베이스라인 평가(build_baseline.evaluate)와 같은 지표.
+    total: 검증 기간 전체 신고 수. 대상 칸 밖에서 나온 신고는 '놓친 것'으로 분모에 들어간다."""
     mu = pred[rate_col].to_numpy() * label_days.to_numpy()
     yv = y.to_numpy()
     top = with_top_percent(pred, rate_col)
@@ -224,7 +241,7 @@ def score(pred: pd.DataFrame, rate_col: str, y: pd.Series, label_days: pd.Series
         return float(2 * np.sum(t - (y_ - m_)))
 
     d, d0 = dev(yv, mu), dev(yv, mu0)
-    total = yv.sum()
+    total = yv.sum() if total is None else total
 
     # 공정한 비교: 요일·시간대마다 예측 상위 k% 칸을 똑같은 개수로 골라 실제 신고를 몇 % 잡는지
     order = pred.groupby(["weekday", "time_slot"])[rate_col].rank(method="first", ascending=False)
@@ -236,6 +253,7 @@ def score(pred: pd.DataFrame, rate_col: str, y: pd.Series, label_days: pd.Series
 
     return {"capture_top5": capture_at(5), "capture_top10": capture_at(10),
             "flagged_cell_share": round(float(flagged.mean()), 4),
+            "reports_in_targets_share": round(float(yv.sum() / total), 4) if total else None,
             "capture_at_caution": round(float(yv[flagged].sum() / total), 4) if total else None,
             "poisson_deviance": round(d, 1), "poisson_deviance_null": round(d0, 1),
             "deviance_improvement_vs_null": round(1 - d / d0, 4) if d0 else None}
@@ -287,9 +305,7 @@ def load_to_db(args) -> None:
     with connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT id FROM data_imports WHERE source_dataset = %s AND active", (SOURCE_DATASET,))
         imp = cur.fetchone()[0]
-        cur.execute("SELECT id FROM prediction_versions WHERE active AND model_type = 'BASELINE_MEAN'")
-        row = cur.fetchone()
-        baseline_id = row[0] if row else None
+        baseline_id = latest_baseline_id(cur)
 
         step("DB에 줄 넣는 중 (몇 분 걸릴 수 있어요)")
         vid = write_version(cur, imp, baseline_id, args.version, targets, serve, metrics)
@@ -325,25 +341,26 @@ def main() -> None:
     # 데이터만 읽고 DB 연결은 바로 닫는다 (학습 중에 연결을 붙잡고 있지 않게)
     step("DB에서 데이터 읽는 중")
     with connect() as conn, conn.cursor() as cur:
-        imp, ev, holidays, targets, baseline_id = load(cur)
-    step(f"읽기 끝. 시민 신고 {len(ev):,}건, 대상 칸 {len(targets):,}개")
+        imp, ev, holidays, targets, targets_eval, baseline_id = load(cur)
+    step(f"읽기 끝. 시민 신고 {len(ev):,}건, 대상 칸 {len(targets):,}개 (평가용: 7/31까지 지번 기준 {len(targets_eval):,}개)")
 
     # 1) 평가: 피처(1/1~5/31) → 정답(6/1~7/31)으로 학습, 피처(1/1~7/31)로 8/1~9/25 채점
     step("평가용 피처 만드는 중")
-    train_a = with_label(build_features(targets, window(ev, "feat_a"), WINDOWS["feat_a"], holidays),
+    train_a = with_label(build_features(targets_eval, window(ev, "feat_a"), WINDOWS["feat_a"], holidays),
                          window(ev, "label_a"), WINDOWS["label_a"], holidays)
-    test_b = with_label(build_features(targets, window(ev, "feat_b"), WINDOWS["feat_b"], holidays),
+    test_b = with_label(build_features(targets_eval, window(ev, "feat_b"), WINDOWS["feat_b"], holidays),
                         window(ev, "label_b"), WINDOWS["label_b"], holidays)
     step("평가용 모델 학습 중")
     model = fit(train_a)
     test_b["rate"] = predict_rate(model, test_b)
-    m_lgbm = score(test_b, "rate", test_b["y"], test_b["label_days"])
+    total_valid = len(window(ev, "label_b"))   # 8/1~9/25 신고 전체 (평가 대상 칸 밖 포함)
+    m_lgbm = score(test_b, "rate", test_b["y"], test_b["label_days"], total_valid)
 
     # 같은 시험지로 베이스라인 채점 (1/1~7/31 과거 평균)
-    base = baseline_table(targets, counts(window(ev, "feat_b")), day_counts(*WINDOWS["feat_b"], holidays))
+    base = baseline_table(targets_eval, counts(window(ev, "feat_b")), day_counts(*WINDOWS["feat_b"], holidays))
     base = base.merge(test_b[["grid_id", "weekday", "time_slot", "y", "label_days"]],
                       on=["grid_id", "weekday", "time_slot"])
-    m_base = score(base, "smoothed_count", base["y"], base["label_days"])
+    m_base = score(base, "smoothed_count", base["y"], base["label_days"], total_valid)
 
     print("베이스라인:", json.dumps(m_base, ensure_ascii=False))
     print("LightGBM :", json.dumps(m_lgbm, ensure_ascii=False))
@@ -375,7 +392,8 @@ def main() -> None:
     serve["top_percent"] = with_top_percent(serve, "rate")
     print(f"2단계 칸 비율 {(serve['top_percent'] <= CAUTION_TOP_PERCENT).mean():.1%}")
 
-    metrics = {"eval_lgbm": m_lgbm, "eval_baseline_same_split": m_base, "better_than_baseline": better,
+    metrics = {"eval_targets": "7/31까지 신고 지번 200m 이내 칸 (검증 기간 위치 미반영), 대상 밖 신고는 놓친 것으로 계산",
+               "eval_lgbm": m_lgbm, "eval_baseline_same_split": m_base, "better_than_baseline": better,
                "eval_split": {k: [str(v[0]), str(v[1])] for k, v in WINDOWS.items()},
                "feature_importance_gain_share": {k: round(v / total_gain, 4) for k, v in imp_gain.items()},
                "params": {k: v for k, v in PARAMS.items() if k != "verbose"}}

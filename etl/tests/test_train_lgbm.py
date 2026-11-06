@@ -38,3 +38,11 @@ def test_score_compares_same_number_of_cells():
     m = score(pred, "rate", y, pd.Series([1.0] * 20))
     assert m["capture_top5"] == 1.0                          # 상위 5% = 1칸이 전부 잡음
     assert m["capture_top10"] == 1.0
+
+
+def test_score_counts_reports_outside_targets_as_missed():
+    pred = pd.DataFrame({"weekday": [6] * 20, "time_slot": [6] * 20, "rate": np.arange(20, 0, -1, dtype=float)})
+    y = pd.Series([5] + [0] * 19)
+    m = score(pred, "rate", y, pd.Series([1.0] * 20), total=10)   # 대상 칸 밖에서 5건 더 나옴
+    assert m["capture_top5"] == 0.5
+    assert m["reports_in_targets_share"] == 0.5
