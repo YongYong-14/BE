@@ -4,7 +4,7 @@ spring:
   datasource:
     hikari:
       data-source-properties:
-        # PostgreSQL DETAIL can contain failed row values, including account data.
+        # PostgreSQL DETAIL can contain account data and vehicle MAC addresses.
         logServerErrorDetail: false
 
 springdoc:
