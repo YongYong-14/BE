@@ -1,6 +1,11 @@
 spring:
   application:
     name: parking-server
+  datasource:
+    hikari:
+      data-source-properties:
+        # PostgreSQL error DETAIL may contain the entire failing row, including MAC addresses.
+        logServerErrorDetail: false
 
 springdoc:
   default-produces-media-type: application/json
