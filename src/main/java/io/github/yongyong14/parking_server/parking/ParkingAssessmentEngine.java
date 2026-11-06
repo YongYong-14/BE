@@ -67,12 +67,10 @@ public class ParkingAssessmentEngine {
                 .addValue("imports",snapshot.facilityImports);
         // Only actual MVP facilities. Published rules must express exactly the agreed legal thresholds.
         var rules=store.jdbc.queryForList("""
-                SELECT zone_type,geometry_rule,legal_distance_m FROM public.zone_rules
-                WHERE rule_set=:rule AND zone_type IN ('HYDRANT','BUS_STOP')
+                SELECT zone_type,geometry_rule,legal_distance_m,fine_amount_car FROM public.zone_rules
+                WHERE rule_set=:rule AND zone_type IN ('HYDRANT','BUS_STOP','OTHER')
                 """,p);
-        if (rules.size()!=2 || rules.stream().anyMatch(r -> !"DISTANCE".equals(r.get("geometry_rule"))
-                || ((Number)r.get("legal_distance_m")).doubleValue() != ("HYDRANT".equals(r.get("zone_type")) ? 5 : 10)))
-            throw new ParkingConfigurationException(ParkingConfigurationException.Code.FACILITY_RULE_CONTRACT_MISMATCH);
+        Number otherFine=ParkingRuleContract.otherFine(rules);
         var hits=snapshot.facilityImports.isEmpty() ? new ArrayList<Map<String,Object>>() : store.jdbc.queryForList("""
                 SELECT f.id AS facility_id,f.zone_type,r.legal_distance_m AS threshold_m,r.fine_amount_car,r.message_template_title,
                   ST_Distance(f.spatial_data,ST_SetSRID(ST_MakePoint(CAST(:lng AS float8),CAST(:lat AS float8)),4326)::geography) AS distance_m,
@@ -130,6 +128,7 @@ public class ParkingAssessmentEngine {
                             int level=top<=threshold ? 2 : 3;
                             values.addValue("status","SUCCEEDED").addValue("level",level).addValue("prediction","OK")
                                     .addValue("predicted",predicted).addValue("top",top);
+                            if (level==2) values.addValue("fine",otherFine);
                             if (level==2) reasons.add(new HashMap<>(Map.of("model",true,
                                     "description",modelDescription(weekday,kst.getHour()/3,top)+" (격자 근사값)")));
                         }

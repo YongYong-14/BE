@@ -40,11 +40,12 @@ class ParkingPostgresTest {
         assertIdentity(api,"parking_api");
         tx=new TransactionTemplate(new DataSourceTransactionManager(source));
         owner.execute("""
-                INSERT INTO zone_types VALUES ('HYDRANT','소화전',true),('BUS_STOP','버스정류소',true);
+                INSERT INTO zone_types VALUES ('HYDRANT','소화전',true),('BUS_STOP','버스정류소',true),('OTHER','기타',false);
                 INSERT INTO zone_rule_sets(rule_set) VALUES ('parking-test');
                 INSERT INTO zone_rules(id,rule_set,zone_type,geometry_rule,legal_distance_m,fine_amount_car)
                   VALUES (gen_random_uuid(),'parking-test','HYDRANT','DISTANCE',5,80000),
-                         (gen_random_uuid(),'parking-test','BUS_STOP','DISTANCE',10,40000);
+                         (gen_random_uuid(),'parking-test','BUS_STOP','DISTANCE',10,40000),
+                         (gen_random_uuid(),'parking-test','OTHER','COVERS',NULL,47000);
                 UPDATE zone_rule_sets SET published_at=now() WHERE rule_set='parking-test';
                 INSERT INTO spatial_grids(id,grid_x,grid_y,boundary)
                   VALUES (101,4170,10500,ST_MakeEnvelope(127,37,128,38,4326)),
@@ -108,7 +109,7 @@ class ParkingPostgresTest {
         var r=sample(UUID.randomUUID()); var first=save(r);
         assertThat(first.created()).isTrue();
         assertThat(first.assessment()).containsEntry("status","SUCCEEDED").containsEntry("level",2)
-                .containsEntry("reference_fine_amount",null)
+                .containsEntry("reference_fine_amount",47000).containsEntry("primary_zone_type",null)
                 .containsEntry("weekday_actual",6).containsEntry("weekday",6).containsEntry("time_slot",6)
                 .containsEntry("top_percent",1.23456789).containsEntry("predicted_count",0.0);
         assertThat(first.reasons()).hasSize(1);
@@ -622,6 +623,65 @@ class ParkingPostgresTest {
             assertThatThrownBy(()->tx.execute(s->useCase.save(user,sample(UUID.randomUUID()))))
                     .isInstanceOfSatisfying(ParkingConfigurationException.class,error->assertThat(error.code()).isEqualTo(expected));
             assertThat(api.queryForObject("SELECT count(*) FROM parking_events WHERE user_id=?",Integer.class,user)).isZero();
+            assertThat(api.queryForObject("SELECT count(*) FROM location_access_logs WHERE user_id=?",Integer.class,user)).isZero();
+        }
+    }
+    @Test void otherFineIsSnapshotAndExistingNullFineIsNeverBackfilledOnReplay() {
+        var request=sample(UUID.randomUUID());
+        var first=save(request);
+        assertThat(ParkingResponse.from(first).assessment().referenceFineAmount()).isEqualTo(47000);
+        owner.execute("""
+                INSERT INTO zone_rule_sets(rule_set) VALUES ('other-fine-next');
+                INSERT INTO zone_rules(id,rule_set,zone_type,geometry_rule,legal_distance_m,fine_amount_car)
+                SELECT gen_random_uuid(),'other-fine-next',zone_type,geometry_rule,legal_distance_m,
+                  CASE WHEN zone_type='OTHER' THEN 52345 ELSE fine_amount_car END
+                FROM zone_rules WHERE rule_set='parking-test';
+                UPDATE zone_rule_sets SET published_at=now() WHERE rule_set='other-fine-next';
+                """);
+        var settings=new ParkingSettings("other-fine-next",List.of(),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50);
+        var next=new ParkingTransactions(store,new ParkingAssessmentEngine(store,settings,new PostgisGridResolver()),settings,
+                new AgreementPolicy("parking-test-version"),clock);
+        owner.update("UPDATE notification_settings SET caution_enabled=false,night_enabled=false WHERE user_id=?",user);
+        assertThat(ParkingResponse.from(tx.execute(s->next.save(user,request)))).isEqualTo(ParkingResponse.from(first));
+        assertThat(tx.execute(s->next.save(user,sample(UUID.randomUUID()))).assessment()).containsEntry("reference_fine_amount",52345);
+        // Simulate a pre-v0.10 stored result: replay must not migrate it to today's fine.
+        owner.update("UPDATE risk_assessments SET reference_fine_amount=NULL WHERE parking_event_id=?",first.parkingEventId());
+        var old=store.assessment(first.parkingEventId());
+        assertThat(tx.execute(s->next.save(user,request)).assessment()).isEqualTo(old).containsEntry("reference_fine_amount",null);
+    }
+    @Test void otherFacilityGeometryCannotPromoteModelResultToLevelOne() {
+        owner.update("""
+                INSERT INTO facilities(id,import_id,source_record_key,zone_type,spatial_data)
+                VALUES (?,?,'other-metadata','OTHER',
+                  ST_SetSRID(ST_MakePoint(127.096184,37.324450),4326)::geography)
+                """,UUID.randomUUID(),importId);
+        var result=save(sample(UUID.randomUUID()));
+        assertThat(result.assessment()).containsEntry("level",2).containsEntry("primary_zone_type",null)
+                .containsEntry("reference_fine_amount",47000).containsEntry("prediction_status","OK");
+        assertThat(result.reasons()).hasSize(1);
+        assertThat(result.reasons().getFirst()).containsEntry("reason_type","MODEL").containsEntry("zone_type",null);
+    }
+    @Test void missingOrMalformedOtherRejectsWithoutSavingEventOrLog() {
+        for (String variant:List.of("absent","geometry","distance","fine")) {
+            String rule="other-invalid-"+variant;
+            owner.update("INSERT INTO zone_rule_sets(rule_set) VALUES (?)",rule);
+            owner.update("""
+                    INSERT INTO zone_rules(id,rule_set,zone_type,geometry_rule,legal_distance_m,fine_amount_car)
+                    SELECT gen_random_uuid(),?,zone_type,geometry_rule,legal_distance_m,fine_amount_car
+                    FROM zone_rules WHERE rule_set='parking-test' AND zone_type<>'OTHER'
+                    """,rule);
+            if (!variant.equals("absent")) owner.update("""
+                    INSERT INTO zone_rules(id,rule_set,zone_type,geometry_rule,legal_distance_m,fine_amount_car)
+                    VALUES (gen_random_uuid(),?,'OTHER',?,?,?)
+                    """,rule,variant.equals("geometry") ? "DISTANCE" : "COVERS",
+                    variant.equals("fine") ? null : 0,variant.equals("fine") ? null : 47000);
+            owner.update("UPDATE zone_rule_sets SET published_at=now() WHERE rule_set=?",rule);
+            var settings=new ParkingSettings(rule,List.of(),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50);
+            var next=new ParkingTransactions(store,new ParkingAssessmentEngine(store,settings,new PostgisGridResolver()),settings,
+                    new AgreementPolicy("parking-test-version"),clock);
+            assertThatThrownBy(()->tx.execute(s->next.save(user,sample(UUID.randomUUID()))))
+                    .isInstanceOf(ParkingConfigurationException.class);
+            assertThat(api.queryForObject("SELECT count(*) FROM parking_events",Integer.class)).isZero();
             assertThat(api.queryForObject("SELECT count(*) FROM location_access_logs WHERE user_id=?",Integer.class,user)).isZero();
         }
     }

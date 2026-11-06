@@ -51,8 +51,10 @@ public class ParkingOpenApiConfig {
             var assessment=new ObjectSchema().addProperty("status",enumeration("SUCCEEDED","PARTIAL","FAILED"))
                     .addProperty("level",nullable("integer").description("SUCCEEDED만 1/2/3, PARTIAL·FAILED는 null"))
                     .addProperty("predictionStatus",nullable("string").description("OK/SKIPPED/NOT_TARGET/OUT_OF_AREA/NO_ACTIVE_VERSION/MISSING_ROW 또는 null"))
-                    .addProperty("primaryZoneType",nullable("string")).addProperty("reasons",new ArraySchema().items(ref("ParkingReason")))
-                    .addProperty("stats",ref("ParkingStats")).addProperty("referenceFineAmount",nullable("integer"))
+                    .addProperty("primaryZoneType",nullable("string").description("1단계 대표 시설 유형. 모델 2·3단계는 null (API v0.10)."))
+                    .addProperty("reasons",new ArraySchema().items(ref("ParkingReason")))
+                    .addProperty("stats",ref("ParkingStats"))
+                    .addProperty("referenceFineAmount",nullable("integer").description("1단계는 대표 시설 규칙, 2단계는 선택한 공개 묶음의 OTHER.fine_amount_car 저장값. 3단계·PARTIAL·FAILED는 null. 기존 이벤트는 저장값 유지."))
                     .addProperty("attemptCount",new IntegerSchema().minimum(BigDecimal.ONE).maximum(BigDecimal.valueOf(2)))
                     .addProperty("notify",ref("ParkingNotify")).addProperty("evaluatedAt",nullable("string").format("date-time"));
             allRequired(assessment); components.addSchemas("ParkingAssessment",assessment);

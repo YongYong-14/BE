@@ -2,11 +2,14 @@
 
 `POST /api/v1/parking-events`의 인증·저장·판정·알림 응답과 커밋 후 비동기 주소 갱신을 구현했다.
 신규는 201, 기존 이벤트 처리(FAILED 재판정 포함)는 200이다. 기존 ApiResponse를 사용한다.
-실제 공유 예측표 접속은 미확인이다. 조회·delivery·LLM·계정·ETL API는 추가하지 않는다.
+공유 DB 직접 접속은 미확인이다. 전달된 덤프의 실제 LightGBM·시설 데이터는 별도 임시 DB에서 검증했다.
+조회·delivery·LLM·계정·ETL API는 추가하지 않는다.
 
 ## 확인한 기준
 
-- `docs/reference/`의 DOCX는 파일명과 본문 첫 제목 모두 API v0.8 / ERD v5.1이다.
+- `docs/reference/`의 최신 DOCX는 파일명과 본문 첫 제목 모두 API v0.10 / ERD v5.1이다.
+  이번 보완은 4절의 OTHER 규칙·2단계 과태료·응답 계약을 적용한다. GPS 전송 정책 등 다른 v0.10 변경은
+  이 규칙 보완의 구현 범위에 포함하지 않으며 별도 대조가 필요하다.
   본문 1절의 schema_v5/ERD v5, reference/README·README·DATABASE·AUTHENTICATION의 v0.6 표기는 오래된 안내다.
 - ERD 본문은 v5.1이며 API v0.6 기준이라는 메타 정보가 남아 있다. 실행 기준은 실제 V1~V5 SQL이다.
   DBML·기존 마이그레이션은 수정하지 않는다.
@@ -60,10 +63,12 @@ address 및 nullable 필드를 생략하지 않는다. primaryZoneType, referenc
 evaluatedAt, reasons, stats, notify의 전체 필드를 포함한다. 근거에는 accuracyMarginM도 포함한다.
 notify_decision·message_title·message_body·evaluated_at은 DB의 저장값을 반환한다.
 실제 알림 표시 성공을 의미하는 delivered_at은 채우지 않는다.
-과태료는 실제 대표 zone_rule의 `fine_amount_car`만 사용한다. 모델에 대응하는 과태료 출처가 없어
-2·3단계에 예시의 40000을 만들어 넣지 않는다.
-**2단계 과태료는 기획 미결이므로 현재 referenceFineAmount=null을 유지한다.** 기획에서
-표시 조건·산출 근거·기준 금액의 출처를 확인하기 전에는 임의의 4만 원 기본값이나 대체값을 추가하지 않는다.
+1단계 과태료는 대표 시설 zone_rule의 `fine_amount_car`, 2단계는 같은 선택된 공개 묶음의
+`OTHER.fine_amount_car`를 판정 트랜잭션에서 읽어 저장·반환한다(API v0.10 4절).
+2단계 `primaryZoneType`과 MODEL 근거의 zoneType은 명세 예시대로 null이다. OTHER를 대표 시설로 표시하지 않는다.
+3단계·PARTIAL·FAILED의 과태료는 null이다. Java의 금액 기본값은 없다.
+이미 저장된 결과는 규칙/설정 변경 뒤에도 그대로 반환하며, 과거 null 금액도 재요청에서 채우지 않는다.
+표시 정책은 v0.10에 반영됐지만 **법령별 금액 검증과 알림 문구 최종 확정은 별도 확인 항목**이다.
 
 알려진 SQLSTATE·제약 이름 조합만 INVALID_TIME_ORDER, AUTO_CONFIRM_NOT_ALLOWED,
 ADJUST_DISTANCE_EXCEEDED 또는 VEHICLE_NOT_FOUND로 변환한다. 다른 FK·CHECK·DB 오류는 공통 500이다.
@@ -236,7 +241,7 @@ FROM public.zone_rule_sets WHERE rule_set = :'selected_rule_set';
 
 SELECT zone_type, geometry_rule, legal_distance_m, fine_amount_car
 FROM public.zone_rules
-WHERE rule_set = :'selected_rule_set' AND zone_type IN ('HYDRANT','BUS_STOP')
+WHERE rule_set = :'selected_rule_set' AND zone_type IN ('HYDRANT','BUS_STOP','OTHER')
 ORDER BY zone_type;
 
 SELECT p.model_version, p.frozen_at, p.validated_at, p.target_cell_count,
@@ -256,8 +261,12 @@ FROM public.zone_types t WHERE t.zone_type IN ('HYDRANT','BUS_STOP');
 COMMIT;
 ```
 
-규칙 묶음은 1행이고 published_at이 있어야 하며, 시설 규칙은 소화전 DISTANCE/5m·버스정류소
-DISTANCE/10m 두 유형의 계약과 일치해야 한다. 시설 존재 여부는 적재 전체의 완전성을 증명하지는 않는다.
+규칙 묶음은 1행이고 published_at이 있어야 한다. 필요한 규칙은 소화전 DISTANCE/5m·버스정류소
+DISTANCE/10m·OTHER COVERS/거리 null의 유형별 1행씩이다. OTHER 금액은 null·음수가 아니어야 한다.
+누락·중복·잘못된 구성은 FACILITY_RULE_CONTRACT_MISMATCH 진단과 공통 500으로 전체 롤백한다.
+실제 중복은 기존 (rule_set, zone_type) UNIQUE도 차단한다. 기본 금액으로 대체하지 않는다.
+OTHER는 금액/문구 메타데이터이며 공간 후보에서는 제외한다. 어린이보호구역 등도 1단계에 추가하지 않는다.
+시설 존재 여부는 적재 전체의 완전성을 증명하지는 않는다.
 활성 예측 버전은 동결·검증 시각과 완전성 메타데이터 및 통계 원천 일치를 확인한다. 실제 적재 완전성은
 기존 동결 함수·보호 제약과 데이터 담당자의 검증을 따른다. 제약을 끄거나 비동결 모델을 활성화하지 않는다.
 활성 버전이 없는 경우는 기존 PARTIAL/NO_ACTIVE_VERSION이며 설정 오류로 바꾸지 않는다.
@@ -286,6 +295,31 @@ MISSING_ROW 등 예상한 판정 장애의 기존 FAILED/success=true 응답은 
 기동 시 검증이나 DB 사전 연결을 새로 추가하지 않았으며, 기존 프로필·lazy 빈·DB 없는 테스트의 동작을 유지한다.
 
 ## 알림 결정과 문구
+
+### rules_v1.sql 적용 전 점검
+
+첨부 [rules_v1.sql](rules_v1.sql)(schema/rules_v1.sql)은 `yongin-2026-11-v1`의 HYDRANT/BUS_STOP/OTHER
+3행을 INSERT하고 COMMIT한다. 자동 공개는 하지 않으며, 파일 끝 공개 UPDATE는 주석이다.
+**단순 INSERT이므로 재실행은 실패한다.** 같은 rule_set이 있으면 내용과 공개 상태를 읽어서 비교한 뒤 중단하며,
+ON CONFLICT로 무시하거나 공개된 규칙을 수정하지 않는다. 다음 조회는 실행할 대상 DB를 먼저 확인한 뒤 수행한다.
+
+```sql
+SELECT zone_type FROM public.zone_types WHERE zone_type IN ('HYDRANT','BUS_STOP','OTHER');
+SELECT rule_set, published_at FROM public.zone_rule_sets WHERE rule_set='yongin-2026-11-v1';
+SELECT zone_type, geometry_rule, legal_distance_m, fine_amount_car
+FROM public.zone_rules WHERE rule_set='yongin-2026-11-v1' ORDER BY zone_type;
+```
+
+유형 3개가 있어야 하고 신규 적용 전 묶음/규칙 조회는 0행이어야 한다. 임시 DB 시험 순서는
+bootstrap/Flyway → 참조 데이터 → SQL 적용 → 미공개 3행과 값 확인 → 임시 DB에서만 공개 →
+서버 `app.parking.rule-set`에 해당 묶음 연결이다. SQL의 실행 역할은 parking_migrator이며 소유권·권한을 바꾸지 않는다.
+시설 우선순위와 현재 약관 버전에는 합의된 설정만 넣는다. 이 절차는 개발 DB 적용을 자동 승인하지 않는다.
+
+SQL의 HYDRANT/BUS_STOP `message_template_title`은 실제 1단계 제목으로 사용한다.
+SQL의 시설 설명 본문과 OTHER 제목/본문은 메타데이터로 보존하지만, API v0.10 4절이 명시한
+통계 기반 1단계 본문과 고정 2단계 제목·요일/구간/백분위 본문을 대체하지 않는다.
+OTHER 행의 금액은 2단계에 적용하며 공간 판정에는 사용하지 않는다. SQL 문구와 API 생성 문구의 차이는
+이처럼 구분하고, 법령 금액 검증과 문구 최종 확정은 기획·담당자 확인으로 남긴다.
 
 우선순위는 감지 후 30분 초과 NONE → 1단계 SEND → 2단계 원시 top_percent가 즉시 경계 이하이면 SEND →
 일반 2단계 caution_enabled=false면 SUPPRESSED_SETTING → KST 22:00 이상 또는 07:00 미만이고
@@ -450,6 +484,35 @@ MISSING_ROW는 조회 경계의 테스트 대역으로 주입하며 동결 가�
   보고서: `build/parking-event-verification/parking-parking-event-dc3f62b794/`.
   공개 묶음 미존재·미공개 및 시설 규칙 불일치에서 이벤트·이용 로그가 롤백되는 것을 실제 DB로 확인했다.
   미동결 활성 모델은 기존 CHECK가 방어하므로 조회 대역으로 검증하고 DB 제약을 우회하지 않았다.
-  정상 모델 2단계의 reference_fine_amount가 null인 것도 실제 DB 결과로 확인했다.
+  당시(v0.10 보완 전) 모델 2단계의 reference_fine_amount가 null인 것도 실제 DB 결과로 확인했다.
 - 기동 검증·프로필·기존 SQL·DBML·판정 정책은 변경하지 않았다.
   개발/운영 DB·기존 볼륨·덤프 복원·#22 병합·커밋·푸시는 수행하지 않았다.
+
+### API v0.10 · rules_v1 보완 검증 (2026-11-06)
+
+- 일반 테스트 98개 및 postgresTest 컴파일 통과. 기존 격리 실행기
+  `Verify-ParkingEvents.ps1`으로 PostgreSQL/PostGIS 테스트 35개 통과, 실패·오류·skip 0.
+  OTHER 누락·중복·형상/거리/금액 오류, OTHER 시설의 1단계 제외, 임의 기본값 없는 금액 조회,
+  규칙 변경 후 저장 금액·알림·시각 유지와 과거 null 금액 미보정, HTTP/Swagger·로그 비노출 회귀를 포함한다.
+  보고서: `build/parking-event-verification/parking-parking-event-9438413ffa/`.
+- 별도 신규 tmpfs PostGIS DB에 bootstrap과 실제 Flyway V1~V5를 적용하고 민지님 덤프의
+  참조 16개 테이블만 재복원했다. 사용자·차량·동의·주차 기록은 가져오지 않았다.
+  보호 트리거를 끄지 않고 미동결 부모 → 자식 → 원본 동결 상태 검증/복원 → 활성화 순서로 적재했다.
+  소유권·ACL·함수·보호 트리거의 적재 전후 fingerprint가 같고 참조 행 수가 원본과 일치했다.
+- 실제 zone_types 3개와 기존 동일 묶음 0개를 확인하고 첨부 SQL을 적용했다.
+  미공개 3행의 형상·거리·금액을 확인한 뒤 **이 임시 DB에서만** 공개했다.
+  재실행은 중복 키로 실패하며 부분 추가가 없고, 공개 후 UPDATE는 기존 트리거가 거부한다.
+  `docs/rules_v1.sql`과 `docs/schema/rules_v1.sql`은 SHA-256이 동일하며 원문은 수정하지 않았다. 규칙 SQL은 `docs/rules_v1.sql` 하나로 관리한다.
+- 현재 코드의 실제 컨트롤러·서비스·트랜잭션 경로에 `yongin-2026-11-v1` 설정을 연결했다.
+  시설 우선순위를 추측하지 않고 서로 다른 시설 유형이 겹치지 않는 실제 시설 점을 선택했다.
+  소화전·정류소 모두 SUCCEEDED/1/SKIPPED와 시설 규칙의 금액·대표 근거를 커밋했다.
+- 시설 규칙 미해당 샘플은 실제 활성 `lgbm-yongin-v1`으로 SUCCEEDED/2/OK,
+  primaryZoneType=null, MODEL 대표 근거 및 OTHER 금액 40000 저장·반환을 확인했다.
+  금액은 SQL의 실제 값이며 Java 상수는 아니다. 같은 테스트는 별도 fixture 금액 47000/52345로도 검증한다.
+  설정을 꺼도 원시 top_percent의 상위 2% 예외로 SEND다. expiresAt은 저장된 detected_at + 30분이다.
+  차량·알림 설정·규칙 선택과 서버 시각 변경 뒤 재요청은 200이며 원래 금액·문구·판정 시각·알림 응답과 동일하다.
+  대표 근거 삭제는 커밋 시 거부되고 기존 근거가 유지된다.
+- 실제 데이터 시험의 사용자·동의·차량은 해당 임시 DB의 명시적 fixture뿐이며 시험 후 삭제했다.
+  HTTP 인증·응답은 별도 격리 회귀 테스트로 검증했다. 실제 카카오 호출이나 공유 DB 직접 접속은 하지 않았다.
+  계정 담당 코드 통합·법령 금액 검증·문구 최종 확정은 미검증/별도 확인으로 남긴다.
+  개발 DB·기존 볼륨·기존 Flyway·DBML 변경, 커밋·푸시는 하지 않았다.

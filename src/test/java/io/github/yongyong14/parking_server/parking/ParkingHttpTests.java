@@ -39,6 +39,7 @@ class ParkingHttpTests {
         a.put("attempt_count",1); a.put("notify_decision","SUCCEEDED".equals(status) ? "SEND" : "NONE");
         a.put("evaluated_at",Timestamp.from(Instant.parse("2026-11-07T10:05:41Z")));
         a.put("top_percent","SUCCEEDED".equals(status) ? 1.23456789 : null);
+        a.put("reference_fine_amount","SUCCEEDED".equals(status) ? 47321 : null);
         a.put("message_title","SUCCEEDED".equals(status) ? "여기는 신고가 잦은 곳이에요" : null);
         return new ParkingTransactions.Result(event,created,a,List.of(),Map.of("detected_at",Timestamp.from(Instant.parse("2026-11-07T10:05:12Z"))));
     }
@@ -57,7 +58,8 @@ class ParkingHttpTests {
                     .andExpect(status().is(code)).andExpect(jsonPath("$.success").value(true)).andReturn().getResponse().getContentAsString());
             assertThat(json.path("error").isNull()).isTrue();
             assertThat(json.at("/data/address").isNull()).isTrue();
-            for (String field:List.of("primaryZoneType","referenceFineAmount")) assertThat(json.at("/data/assessment/"+field).isNull()).isTrue();
+            assertThat(json.at("/data/assessment/primaryZoneType").isNull()).isTrue();
+            assertThat(json.at("/data/assessment/referenceFineAmount").asInt()).isEqualTo(47321);
             assertThat(json.at("/data/assessment/notify/expiresAt").asText()).isEqualTo("2026-11-07T19:35:12+09:00");
             assertThat(json.at("/data/assessment/attemptCount").asInt()).isEqualTo(1);
             assertThat(json.at("/data/assessment/evaluatedAt").asText()).isEqualTo("2026-11-07T19:05:41+09:00");
