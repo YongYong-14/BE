@@ -16,6 +16,9 @@ springdoc:
   override-with-generic-response: false
 
 app:
+  kakao:
+    local:
+      rest-api-key: ${KAKAO_LOCAL_REST_API_KEY:}
   auth:
     issuer: ${JWT_ISSUER}
     secret-base64: ${JWT_SECRET_BASE64}
