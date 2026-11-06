@@ -62,6 +62,8 @@ notify_decision·message_title·message_body·evaluated_at은 DB의 저장값을
 실제 알림 표시 성공을 의미하는 delivered_at은 채우지 않는다.
 과태료는 실제 대표 zone_rule의 `fine_amount_car`만 사용한다. 모델에 대응하는 과태료 출처가 없어
 2·3단계에 예시의 40000을 만들어 넣지 않는다.
+**2단계 과태료는 기획 미결이므로 현재 referenceFineAmount=null을 유지한다.** 기획에서
+표시 조건·산출 근거·기준 금액의 출처를 확인하기 전에는 임의의 4만 원 기본값이나 대체값을 추가하지 않는다.
 
 알려진 SQLSTATE·제약 이름 조합만 INVALID_TIME_ORDER, AUTO_CONFIRM_NOT_ALLOWED,
 ADJUST_DISTANCE_EXCEEDED 또는 VEHICLE_NOT_FOUND로 변환한다. 다른 FK·CHECK·DB 오류는 공통 500이다.
@@ -207,6 +209,81 @@ API 개수만 맞추기 위해 검증을 삭제하지 않는다.
 현재 버전을 바꾸면 기존 주차 재요청도 최신 동의부터 다시 확인하므로 새 현재 버전에 동의하기 전에는 403이다.
 새 버전에 AGREE한 뒤 같은 키를 재요청하면 기존 차량·알림 설정과 관계없이 저장된 판정을 그대로 반환한다.
 계정 담당 코드의 실제 통합 검증은 아직 남아 있다.
+
+## 실행 전 설정·참조 데이터 점검
+
+| 설정 | 실행 환경 연결 | 확인할 계약 |
+| --- | --- | --- |
+| `app.parking.rule-set` | `APP_PARKING_RULE_SET` 또는 같은 이름의 Spring 실행 속성 | 데이터 담당자와 합의한 실제 공개 묶음. 값이 없거나 미공개/미존재이면 설정 오류다. 최신 날짜의 묶음을 임의로 선택하지 않는다. |
+| `app.parking.facility-priority` | `APP_PARKING_FACILITY_PRIORITY` 또는 같은 이름의 Spring 실행 속성 | 여러 시설 유형이 겹칠 때의 합의된 CSV 순서. 임의 순서를 기본값으로 넣지 않는다. 미설정 다중 유형 겹침은 기존 FAILED/FACILITY_PRIORITY_UNCONFIGURED이며, 단일 유형 안의 거리→UUID 순서는 유지한다. |
+| `app.account.location-versions` | `AUTH_LOCATION_VERSIONS` | 첫 값이 합의된 현재 버전. 시연에는 그 버전 하나만 사용한다. 빈 설정이면 동의 행이 있어도 403이다. |
+
+셸의 `.env` 로더와 IDE 실행 환경 주입은 DATABASE.md의 절차를 따른다. `.env` 파일이 있다고
+이미 실행된 JVM에 설정이 자동 반영되는 것은 아니다. 변경한 설정은 해당 앱 프로세스를 다시 실행해 반영한다.
+실제 비밀값이나 전체 환경변수를 출력하며 점검하지 않는다. 설정을 채우기 위해 동의·규칙·시설·예측 데이터를
+임의로 만들지 않고, 필요한 합의값/적재 상태를 담당자에게 확인한다.
+
+참조 데이터는 연결 대상 DB를 확인한 뒤 읽기 전용 계정·트랜잭션으로 점검한다. 다음은 psql 예시이며
+입력값은 현재 앱에 설정한 합의된 rule-set이다. 관리용 publish/freeze/activate/purge 명령은 포함하지 않는다.
+
+```sql
+\prompt 'Configured app.parking.rule-set: ' selected_rule_set
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SELECT current_database(), current_user;
+
+SELECT rule_set, published_at
+FROM public.zone_rule_sets WHERE rule_set = :'selected_rule_set';
+
+SELECT zone_type, geometry_rule, legal_distance_m, fine_amount_car
+FROM public.zone_rules
+WHERE rule_set = :'selected_rule_set' AND zone_type IN ('HYDRANT','BUS_STOP')
+ORDER BY zone_type;
+
+SELECT p.model_version, p.frozen_at, p.validated_at, p.target_cell_count,
+       p.loaded_row_count, p.loaded_row_count = p.target_cell_count::bigint * 56 AS complete_metadata,
+       p.caution_top_percent, p.source_import_id,
+       p.source_import_id = (
+         SELECT id FROM public.data_imports
+         WHERE source_dataset = 'yongin_enforcement' AND active
+       ) AS matches_active_statistics_import
+FROM public.prediction_versions p WHERE p.active;
+
+SELECT t.zone_type, EXISTS (
+  SELECT 1 FROM public.facilities f JOIN public.data_imports d ON d.id = f.import_id
+  WHERE d.active AND f.zone_type = t.zone_type
+) AS has_active_facilities
+FROM public.zone_types t WHERE t.zone_type IN ('HYDRANT','BUS_STOP');
+COMMIT;
+```
+
+규칙 묶음은 1행이고 published_at이 있어야 하며, 시설 규칙은 소화전 DISTANCE/5m·버스정류소
+DISTANCE/10m 두 유형의 계약과 일치해야 한다. 시설 존재 여부는 적재 전체의 완전성을 증명하지는 않는다.
+활성 예측 버전은 동결·검증 시각과 완전성 메타데이터 및 통계 원천 일치를 확인한다. 실제 적재 완전성은
+기존 동결 함수·보호 제약과 데이터 담당자의 검증을 따른다. 제약을 끄거나 비동결 모델을 활성화하지 않는다.
+활성 버전이 없는 경우는 기존 PARTIAL/NO_ACTIVE_VERSION이며 설정 오류로 바꾸지 않는다.
+일부 데이터만 있거나 원천이 다르면 담당 적재 상태를 확인하고 임시 성공 결과로 대체하지 않는다.
+
+위치 동의는 AUTH_LOCATION_VERSIONS의 첫 값과 사용자별 최신 LOCATION_SERVICE 이벤트의
+version·action을 대조한다. 최신은 occurred_at이 아니라 최대 id 기준이다. 해당 사용자만 조회하고
+최신 이벤트가 현재 버전 AGREE인지 확인하며 WITHDRAW나 이전 버전 AGREE를 건너뛰지 않는다.
+이 조회를 위해 토큰·비밀번호·원본 좌표를 출력하거나 동의 데이터를 임의 추가하지 않는다.
+
+### 안전한 서버 진단 코드
+
+설정 검증 실패는 요청 시 기존 트랜잭션에서 거절·롤백하고, 서비스에서 다음 고정 코드만 ERROR로 기록한다.
+API는 세 경우 모두 기존 `500 INTERNAL_SERVER_ERROR`이며 내부 코드를 응답하지 않는다.
+
+| 내부 로그 코드 | 기존 거절 조건 |
+| --- | --- |
+| `PUBLIC_RULE_SET_UNAVAILABLE` | 설정된 공개 규칙 묶음이 선택되지 않음: 누락·미존재·미공개 포함 |
+| `MODEL_VERSION_NOT_FROZEN` | 선택된 활성 모델의 동결 시각 누락. 정상 스키마에서는 기존 DB 제약도 방어함 |
+| `FACILITY_RULE_CONTRACT_MISMATCH` | 공개 묶음의 MVP 시설 유형·거리 규칙 계약 불일치 |
+
+로그 형식은 `Parking configuration rejected: code=<고정 코드>`다. 원래 IllegalStateException 메시지,
+원인 체인, 설정값·원본 SQL·바인딩 값·좌표·토큰·비밀번호·외부 응답은 붙이지 않는다.
+알 수 없는 IllegalStateException도 메시지를 무조건 출력하지 않는다.
+MISSING_ROW 등 예상한 판정 장애의 기존 FAILED/success=true 응답은 이 설정 오류와 구분해 유지한다.
+기동 시 검증이나 DB 사전 연결을 새로 추가하지 않았으며, 기존 프로필·lazy 빈·DB 없는 테스트의 동작을 유지한다.
 
 ## 알림 결정과 문구
 
@@ -360,3 +437,19 @@ MISSING_ROW는 조회 경계의 테스트 대역으로 주입하며 동결 가�
   실제 .env는 읽거나 수정하지 않았고 새 합의 버전값을 임의로 지정하지 않았다.
 - 주차 트랜잭션·사용자 잠금·최신 이벤트 조회·위험/알림 정책·좌표/시각 정규화 및 OpenApiTests.java는 변경하지 않았다.
   #22는 원격 head의 코드를 읽기만 했으며 병합·수정하지 않았다. 통합은 후속 dev 반영 시 재확인한다.
+
+### 비차단 리뷰: 설정 진단·안내 검증 (2026-11-06)
+
+- 일반 테스트 94개와 PostgreSQL 테스트 컴파일 통과. 로그 비노출 검사를 강화한 후
+  HTTP·설정 진단 관련 테스트 10개를 추가 재실행해 통과했다. 실패·오류·skip 0.
+- 고정 진단 코드 3개의 실제 검증 분기, API의 기존 INTERNAL_SERVER_ERROR 및
+  예상 판정 장애의 FAILED/success=true 유지 여부를 확인했다. 루트 로그 이벤트의 메시지와
+  예외 스택 모두에서 민감정보 모사 원인, 개별 요청 좌표, 원문 토큰·Bearer 헤더가 제외되는지 검사했다.
+  진단 이벤트 자체에는 원인 체인/스택을 붙이지 않는다.
+- 격리 PostgreSQL/PostGIS 테스트 32개 통과, 실패·오류·skip 0.
+  보고서: `build/parking-event-verification/parking-parking-event-dc3f62b794/`.
+  공개 묶음 미존재·미공개 및 시설 규칙 불일치에서 이벤트·이용 로그가 롤백되는 것을 실제 DB로 확인했다.
+  미동결 활성 모델은 기존 CHECK가 방어하므로 조회 대역으로 검증하고 DB 제약을 우회하지 않았다.
+  정상 모델 2단계의 reference_fine_amount가 null인 것도 실제 DB 결과로 확인했다.
+- 기동 검증·프로필·기존 SQL·DBML·판정 정책은 변경하지 않았다.
+  개발/운영 DB·기존 볼륨·덤프 복원·#22 병합·커밋·푸시는 수행하지 않았다.

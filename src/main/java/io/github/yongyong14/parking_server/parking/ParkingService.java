@@ -7,6 +7,7 @@ import io.github.yongyong14.parking_server.global.exception.*;
 
 @Service
 public class ParkingService {
+    private static final org.slf4j.Logger log=org.slf4j.LoggerFactory.getLogger(ParkingService.class);
     private final ParkingTransactions transactions;
     private final ParkingSettings settings;
     public ParkingService(@Lazy ParkingTransactions transactions, ParkingSettings settings) {
@@ -21,6 +22,11 @@ public class ParkingService {
         } catch (RuntimeException failure) {
             // Transaction proxy has completed rollback before known constraint translation.
             for (Throwable cause=failure;cause!=null;cause=cause.getCause()) {
+                if (cause instanceof ParkingConfigurationException configuration) {
+                    // No throwable argument: its cause chain may contain SQL, private inputs or provider bodies.
+                    log.error("Parking configuration rejected: code={}",configuration.code());
+                    throw new BusinessException(ErrorCode.INTERNAL_SERVER_ERROR);
+                }
                 if (cause instanceof org.postgresql.util.PSQLException pg && pg.getServerErrorMessage()!=null) {
                     String constraint=pg.getServerErrorMessage().getConstraint();
                     if ("23514".equals(pg.getSQLState())) {

@@ -116,4 +116,41 @@ class ParkingHttpTests {
                 .andExpect(jsonPath("$.components.schemas.ParkingRequest.properties.originalLocation.oneOf[1].type").value("null"))
                 .andExpect(jsonPath("$.components.schemas.ParkingRequest.additionalProperties").value(false));
     }
+    @Test void configurationCodesAreLoggedWithoutPrivateMessagesOrCausesAndApiRemains500() throws Exception {
+        var logger=(ch.qos.logback.classic.Logger)org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        var appender=new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start(); logger.addAppender(appender);
+        String privateMarker="private-sql-bind-coordinate-token-password-provider-response";
+        try {
+            for (var code:ParkingConfigurationException.Code.values()) {
+                var failure=new ParkingConfigurationException(code);
+                failure.initCause(new IllegalStateException(privateMarker));
+                doThrow(failure).when(transactions).save(eq(user),any());
+                mvc.perform(post("/api/v1/parking-events").header("Authorization",bearer).contentType("application/json").content(body))
+                        .andExpect(status().isInternalServerError()).andExpect(jsonPath("$.error.code").value("INTERNAL_SERVER_ERROR"))
+                        .andExpect(content().string(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString(code.name()))));
+                assertThat(appender.list).anySatisfy(event->{
+                    assertThat(event.getLoggerName()).isEqualTo(ParkingService.class.getName());
+                    assertThat(event.getLevel()).isEqualTo(ch.qos.logback.classic.Level.ERROR);
+                    assertThat(event.getFormattedMessage()).isEqualTo("Parking configuration rejected: code="+code.name());
+                    assertThat(event.getThrowableProxy()).isNull();
+                });
+            }
+            doThrow(new IllegalStateException(privateMarker,new java.sql.SQLException(privateMarker))).when(transactions).save(eq(user),any());
+            mvc.perform(post("/api/v1/parking-events").header("Authorization",bearer).contentType("application/json").content(body))
+                    .andExpect(status().isInternalServerError()).andExpect(jsonPath("$.error.code").value("INTERNAL_SERVER_ERROR"));
+            long diagnosticCount=appender.list.stream().filter(event->event.getLoggerName().equals(ParkingService.class.getName())).count();
+            doReturn(result(true,"FAILED")).when(transactions).save(eq(user),any());
+            mvc.perform(post("/api/v1/parking-events").header("Authorization",bearer).contentType("application/json").content(body))
+                    .andExpect(status().isCreated()).andExpect(jsonPath("$.success").value(true))
+                    .andExpect(jsonPath("$.data.assessment.status").value("FAILED"));
+            assertThat(appender.list.stream().filter(event->event.getLoggerName().equals(ParkingService.class.getName())).count()).isEqualTo(diagnosticCount);
+            for (var event:appender.list) {
+                assertThat(event.getFormattedMessage()).doesNotContain(privateMarker,bearer,bearer.substring(7),body,"37.324450","127.096184");
+                if(event.getThrowableProxy()!=null)
+                    assertThat(ch.qos.logback.classic.spi.ThrowableProxyUtil.asString(event.getThrowableProxy()))
+                            .doesNotContain(privateMarker,bearer,bearer.substring(7),body,"37.324450","127.096184");
+            }
+        } finally { logger.detachAppender(appender); appender.stop(); }
+    }
 }

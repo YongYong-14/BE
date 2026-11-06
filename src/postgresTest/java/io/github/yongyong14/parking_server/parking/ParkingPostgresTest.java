@@ -108,6 +108,7 @@ class ParkingPostgresTest {
         var r=sample(UUID.randomUUID()); var first=save(r);
         assertThat(first.created()).isTrue();
         assertThat(first.assessment()).containsEntry("status","SUCCEEDED").containsEntry("level",2)
+                .containsEntry("reference_fine_amount",null)
                 .containsEntry("weekday_actual",6).containsEntry("weekday",6).containsEntry("time_slot",6)
                 .containsEntry("top_percent",1.23456789).containsEntry("predicted_count",0.0);
         assertThat(first.reasons()).hasSize(1);
@@ -603,6 +604,26 @@ class ParkingPostgresTest {
         assertThat(ParkingResponse.from(replay)).isEqualTo(ParkingResponse.from(first));
         assertThat(api.queryForObject("SELECT count(*) FROM parking_events",Integer.class)).isEqualTo(1);
         assertThat(api.queryForObject("SELECT count(*) FROM location_access_logs WHERE parking_event_id=?",Integer.class,first.parkingEventId())).isEqualTo(1);
+    }
+    @Test void invalidPublishedRuleConfigurationRejectsAndRollsBackNewEvent() {
+        owner.update("INSERT INTO zone_rule_sets(rule_set) VALUES ('diagnostic-draft'),('diagnostic-mismatch')");
+        owner.execute("""
+                INSERT INTO zone_rules(id,rule_set,zone_type,geometry_rule,legal_distance_m)
+                VALUES (gen_random_uuid(),'diagnostic-mismatch','HYDRANT','DISTANCE',6),
+                       (gen_random_uuid(),'diagnostic-mismatch','BUS_STOP','DISTANCE',10);
+                UPDATE zone_rule_sets SET published_at=now() WHERE rule_set='diagnostic-mismatch';
+                """);
+        for (String rule:List.of("diagnostic-missing","diagnostic-draft","diagnostic-mismatch")) {
+            var settings=new ParkingSettings(rule,List.of("HYDRANT","BUS_STOP"),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50);
+            var useCase=new ParkingTransactions(store,new ParkingAssessmentEngine(store,settings,new PostgisGridResolver()),settings,
+                    new AgreementPolicy("parking-test-version"),clock);
+            var expected=rule.equals("diagnostic-mismatch") ? ParkingConfigurationException.Code.FACILITY_RULE_CONTRACT_MISMATCH
+                    : ParkingConfigurationException.Code.PUBLIC_RULE_SET_UNAVAILABLE;
+            assertThatThrownBy(()->tx.execute(s->useCase.save(user,sample(UUID.randomUUID()))))
+                    .isInstanceOfSatisfying(ParkingConfigurationException.class,error->assertThat(error.code()).isEqualTo(expected));
+            assertThat(api.queryForObject("SELECT count(*) FROM parking_events WHERE user_id=?",Integer.class,user)).isZero();
+            assertThat(api.queryForObject("SELECT count(*) FROM location_access_logs WHERE user_id=?",Integer.class,user)).isZero();
+        }
     }
     void assertCode(Runnable action,ErrorCode code) { assertThatThrownBy(action::run).isInstanceOf(BusinessException.class).extracting(e->((BusinessException)e).getErrorCode()).isEqualTo(code); }
     static String required(String key) { String v=System.getenv(key); if (v==null || v.isBlank()) throw new IllegalStateException("Missing isolated parking test input: "+key); return v; }

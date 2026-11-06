@@ -73,7 +73,7 @@ try {
     if ($process.ExitCode -ne 0) { throw "ParkingEvent tests failed; see $report/gradle.log" }
     $results = Join-Path $repo 'build/test-results/postgresTest/TEST-io.github.yongyong14.parking_server.parking.ParkingPostgresTest.xml'
     [xml]$xml = [IO.File]::ReadAllText($results)
-    if ([int]$xml.testsuite.tests -lt 31 -or [int]$xml.testsuite.failures -ne 0 -or
+    if ([int]$xml.testsuite.tests -lt 32 -or [int]$xml.testsuite.failures -ne 0 -or
         [int]$xml.testsuite.errors -ne 0 -or [int]$xml.testsuite.skipped -ne 0) {
         throw 'Expected parking-event integration tests.'
     }

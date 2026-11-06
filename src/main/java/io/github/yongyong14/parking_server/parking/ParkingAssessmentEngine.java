@@ -32,10 +32,10 @@ public class ParkingAssessmentEngine {
                 FROM public.zone_rule_sets rs LEFT JOIN public.prediction_versions pv ON pv.active
                 WHERE rs.rule_set=:rule AND rs.published_at IS NOT NULL
                 """,Map.of("rule",settings.ruleSet()));
-        if (rows.size()!=1) throw new IllegalStateException("Published parking rule set must be configured");
+        if (rows.size()!=1) throw new ParkingConfigurationException(ParkingConfigurationException.Code.PUBLIC_RULE_SET_UNAVAILABLE);
         var row=rows.getFirst();
         Map<String,Object> version=row.get("id")==null ? null : row;
-        if (version!=null && version.get("frozen_at")==null) throw new IllegalStateException("Active prediction version must be frozen");
+        if (version!=null && version.get("frozen_at")==null) throw new ParkingConfigurationException(ParkingConfigurationException.Code.MODEL_VERSION_NOT_FROZEN);
         List<UUID> imports;
         try { imports=Arrays.asList((UUID[])((java.sql.Array)row.get("facility_imports")).getArray()); }
         catch (java.sql.SQLException e) { throw new IllegalStateException("Cannot read data snapshot",e); }
@@ -72,7 +72,7 @@ public class ParkingAssessmentEngine {
                 """,p);
         if (rules.size()!=2 || rules.stream().anyMatch(r -> !"DISTANCE".equals(r.get("geometry_rule"))
                 || ((Number)r.get("legal_distance_m")).doubleValue() != ("HYDRANT".equals(r.get("zone_type")) ? 5 : 10)))
-            throw new IllegalStateException("Published MVP facility rules do not match the API contract");
+            throw new ParkingConfigurationException(ParkingConfigurationException.Code.FACILITY_RULE_CONTRACT_MISMATCH);
         var hits=snapshot.facilityImports.isEmpty() ? new ArrayList<Map<String,Object>>() : store.jdbc.queryForList("""
                 SELECT f.id AS facility_id,f.zone_type,r.legal_distance_m AS threshold_m,r.fine_amount_car,r.message_template_title,
                   ST_Distance(f.spatial_data,ST_SetSRID(ST_MakePoint(CAST(:lng AS float8),CAST(:lat AS float8)),4326)::geography) AS distance_m,
