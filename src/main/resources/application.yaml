@@ -1,6 +1,11 @@
 spring:
   application:
     name: parking-server
+  datasource:
+    hikari:
+      data-source-properties:
+        # PostgreSQL DETAIL can contain failed row values, including account data.
+        logServerErrorDetail: false
 
 springdoc:
   default-produces-media-type: application/json
@@ -16,6 +21,12 @@ app:
     secret-base64: ${JWT_SECRET_BASE64}
     access-ttl: ${JWT_ACCESS_TTL:30m}
     refresh-ttl: ${AUTH_REFRESH_TTL:30d}
+  account:
+    kakao-app-id: "${KAKAO_APP_ID:0}"
+    kakao-admin-key: "${KAKAO_PRIMARY_ADMIN_KEY:}"
+    terms-versions: "${AUTH_TERMS_VERSIONS:}"
+    privacy-versions: "${AUTH_PRIVACY_VERSIONS:}"
+    location-versions: "${AUTH_LOCATION_VERSIONS:}"
   security:
     swagger-public: false
     allowed-origins: ${CORS_ALLOWED_ORIGINS:}
