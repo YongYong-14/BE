@@ -16,6 +16,8 @@ springdoc:
   override-with-generic-response: false
 
 app:
+  account:
+    location-versions: ${AUTH_LOCATION_VERSIONS:}
   kakao:
     local:
       rest-api-key: ${KAKAO_LOCAL_REST_API_KEY:}

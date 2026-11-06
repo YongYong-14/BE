@@ -84,7 +84,7 @@ class ParkingPostgresTest {
         store=new ParkingStore(source);
         var settings=new ParkingSettings("parking-test",List.of("HYDRANT","BUS_STOP"),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50);
         service=new ParkingTransactions(store,new ParkingAssessmentEngine(store,settings,new PostgisGridResolver()),settings,
-                new AgreementPolicy(Set.of("parking-test-version")),clock);
+                new AgreementPolicy(required("AUTH_LOCATION_VERSIONS")),clock);
     }
     ParkingRequest request(UUID key,String lat,String lng) {
         var t=OffsetDateTime.parse("2026-11-07T19:05:12+09:00");
@@ -189,7 +189,7 @@ class ParkingPostgresTest {
         var fault=new ParkingAssessmentEngine(store,settings,new PostgisGridResolver()) {
             @Override protected List<Map<String,Object>> predictions(Map<String,Object> key) { return List.of(); }
         };
-        var failing=new ParkingTransactions(store,fault,settings,new AgreementPolicy(Set.of("parking-test-version")),clock);
+        var failing=new ParkingTransactions(store,fault,settings,new AgreementPolicy("parking-test-version"),clock);
         var request=sample(UUID.randomUUID());
         var first=tx.execute(s->failing.save(user,request));
         assertThat(first.assessment()).containsEntry("status","FAILED").containsEntry("prediction_status","MISSING_ROW").containsEntry("level",null);
@@ -210,7 +210,7 @@ class ParkingPostgresTest {
         var boundaryService=new ParkingTransactions(store,new ParkingAssessmentEngine(store,
                 new ParkingSettings("parking-test",List.of(),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50),new PostgisGridResolver()),
                 new ParkingSettings("parking-test",List.of(),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50),
-                new AgreementPolicy(Set.of("parking-test-version")),Clock.fixed(boundary.toInstant(),ZoneOffset.UTC));
+                new AgreementPolicy("parking-test-version"),Clock.fixed(boundary.toInstant(),ZoneOffset.UTC));
         var r=new ParkingRequest(base.clientEventId(),vehicle,boundary,boundary,base.confirmationMethod(),null,null,base.confirmedLocation(),0);
         var a=tx.execute(s->boundaryService.save(user,r)).assessment();
         assertThat(a).containsEntry("weekday_actual",7).containsEntry("time_slot",1);
@@ -255,7 +255,7 @@ class ParkingPostgresTest {
         var first=save(boundary);
         var settings=new ParkingSettings("parking-test",List.of(),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50);
         var earlierClock=new ParkingTransactions(store,new ParkingAssessmentEngine(store,settings,new PostgisGridResolver()),settings,
-                new AgreementPolicy(Set.of("parking-test-version")),Clock.fixed(now.minusSeconds(3600),ZoneOffset.UTC));
+                new AgreementPolicy("parking-test-version"),Clock.fixed(now.minusSeconds(3600),ZoneOffset.UTC));
         assertThat(tx.execute(s->earlierClock.save(user,boundary)).assessment()).isEqualTo(first.assessment());
         var withinMicrosecond=new ParkingRequest(UUID.randomUUID(),vehicle,time.plusNanos(999),time.plusNanos(999),base.confirmationMethod(),null,null,base.confirmedLocation(),0);
         save(withinMicrosecond);
@@ -276,7 +276,7 @@ class ParkingPostgresTest {
         assertThat(((Number)a.reasons().getFirst().get("distance_m")).doubleValue()).isCloseTo(4.9,within(0.001));
         var settings=new ParkingSettings("parking-test",List.of(),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50);
         var noPriority=new ParkingTransactions(store,new ParkingAssessmentEngine(store,settings,new PostgisGridResolver()),settings,
-                new AgreementPolicy(Set.of("parking-test-version")),clock);
+                new AgreementPolicy("parking-test-version"),clock);
         var pending=tx.execute(s->noPriority.save(user,sample(UUID.randomUUID())));
         assertThat(pending.assessment()).containsEntry("status","FAILED").containsEntry("level",null).containsEntry("error_code","FACILITY_PRIORITY_UNCONFIGURED");
     }
@@ -290,7 +290,7 @@ class ParkingPostgresTest {
         context.registerBean(org.springframework.transaction.PlatformTransactionManager.class,()->new DataSourceTransactionManager(source));
         context.registerBean(Clock.class,()->clock);
         context.registerBean(ParkingSettings.class,()->new ParkingSettings("parking-test",List.of("HYDRANT","BUS_STOP"),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50));
-        context.registerBean(AgreementPolicy.class,()->new AgreementPolicy(Set.of("parking-test-version")));
+        context.registerBean(AgreementPolicy.class,()->new AgreementPolicy(required("AUTH_LOCATION_VERSIONS")));
         context.registerBean(ParkingNotificationPolicy.class,()->new ParkingNotificationPolicy(2));
         context.registerBean(GridResolver.class,PostgisGridResolver::new);
         context.registerBean(ReverseGeocoder.class,()->geocoder);
@@ -441,7 +441,7 @@ class ParkingPostgresTest {
         var settings=new ParkingSettings("parking-test",List.of("HYDRANT","BUS_STOP"),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50);
         var policy=new ParkingNotificationPolicy(0.5); // fixture is 1.23456789: ordinary level 2
         var custom=new ParkingTransactions(store,new ParkingAssessmentEngine(store,settings,new PostgisGridResolver(),policy),settings,
-                new AgreementPolicy(Set.of("parking-test-version")),clock);
+                new AgreementPolicy("parking-test-version"),clock);
         owner.update("UPDATE notification_settings SET caution_enabled=false,night_enabled=false WHERE user_id=?",user);
         var r=sample(UUID.randomUUID());
         var first=tx.execute(s->custom.save(user,r));
@@ -451,7 +451,7 @@ class ParkingPostgresTest {
         owner.execute("UPDATE prediction_versions SET active=false");
         assertThat(ParkingResponse.from(save(r))).isEqualTo(firstResponse);
         var later=new ParkingTransactions(store,new ParkingAssessmentEngine(store,settings,new PostgisGridResolver()),settings,
-                new AgreementPolicy(Set.of("parking-test-version")),Clock.fixed(now.plusSeconds(86400),ZoneOffset.UTC));
+                new AgreementPolicy("parking-test-version"),Clock.fixed(now.plusSeconds(86400),ZoneOffset.UTC));
         assertThat(ParkingResponse.from(tx.execute(s->later.save(user,r)))).isEqualTo(firstResponse);
     }
     @Test void pausedNewRequestRechecksWinnerAfterVehicleReplacementAndReturnsStoredResult() throws Exception {
@@ -480,7 +480,7 @@ class ParkingPostgresTest {
         };
         var settings=new ParkingSettings("parking-test",List.of("HYDRANT","BUS_STOP"),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50);
         var bService=new ParkingTransactions(pausedStore,new ParkingAssessmentEngine(pausedStore,settings,new PostgisGridResolver()),settings,
-                new AgreementPolicy(Set.of("parking-test-version")),clock);
+                new AgreementPolicy("parking-test-version"),clock);
         var request=sample(UUID.randomUUID());
         var second=new ParkingRequest(request.clientEventId(),vehicle,request.detectedAt(),request.confirmedAt(),request.confirmationMethod(),
                 null,null,request.confirmedLocation(),changedBody ? 1 : 0);
@@ -527,7 +527,7 @@ class ParkingPostgresTest {
             var raw=OffsetDateTime.parse(timestamp); var canonical=raw.truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             var clock=Clock.fixed(raw.toInstant(),ZoneOffset.UTC);
             var useCase=new ParkingTransactions(store,new ParkingAssessmentEngine(store,settings,new PostgisGridResolver(),policy),settings,
-                    new AgreementPolicy(Set.of("parking-test-version")),clock);
+                    new AgreementPolicy("parking-test-version"),clock);
             var key=UUID.randomUUID();
             var request=new ParkingRequest(key,vehicle,raw,raw,ParkingRequest.Method.CONFIRMED,null,
                     new ParkingRequest.LastKnown(new BigDecimal("37.324450"),new BigDecimal("127.096184"),raw.minusMinutes(1)),
@@ -563,6 +563,46 @@ class ParkingPostgresTest {
         var coordinates=new ParkingRequest(UUID.randomUUID(),vehicle,r.detectedAt(),r.confirmedAt(),r.confirmationMethod(),null,null,new ParkingRequest.Point(tiny,tiny),0);
         var stored=save(coordinates);
         assertThat(api.queryForObject("SELECT ST_X(confirmed_location::geometry) FROM parking_events WHERE id=?",Double.class,stored.parkingEventId())).isEqualTo(0.0);
+    }
+    ParkingTransactions withAgreementPolicy(String csv) {
+        var settings=new ParkingSettings("parking-test",List.of("HYDRANT","BUS_STOP"),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50);
+        return new ParkingTransactions(store,new ParkingAssessmentEngine(store,settings,new PostgisGridResolver()),settings,new AgreementPolicy(csv),clock);
+    }
+    @Test void latestCurrentAgreementAllowsParkingWhenPreviousVersionsAreAlsoInList() {
+        var useCase=withAgreementPolicy(" parking-test-version , parking-prev-version ");
+        var result=tx.execute(s->useCase.save(user,sample(UUID.randomUUID())));
+        assertThat(result.created()).isTrue();
+    }
+    @Test void latestPreviousAgreementIsNotCurrentEvenIfEarlierCurrentAgreementExists() {
+        owner.update("INSERT INTO user_agreements(user_id,agreement_type,version,action) VALUES (?,'LOCATION_SERVICE','parking-prev-version','AGREE')",user);
+        var useCase=withAgreementPolicy("parking-test-version,parking-prev-version");
+        assertCode(()->tx.execute(s->useCase.save(user,sample(UUID.randomUUID()))),ErrorCode.LOCATION_CONSENT_REQUIRED);
+        assertThat(api.queryForObject("SELECT count(*) FROM parking_events",Integer.class)).isZero();
+    }
+    @Test void latestWithdrawalDoesNotFallBackToPriorCurrentAgreement() {
+        owner.update("INSERT INTO user_agreements(user_id,agreement_type,version,action,occurred_at) VALUES (?,'LOCATION_SERVICE','parking-test-version','WITHDRAW','2020-01-01')",user);
+        var useCase=withAgreementPolicy("parking-test-version,parking-prev-version");
+        assertCode(()->tx.execute(s->useCase.save(user,sample(UUID.randomUUID()))),ErrorCode.LOCATION_CONSENT_REQUIRED);
+    }
+    @Test void emptyVersionConfigurationRejectsEvenCurrentAgreementFixture() {
+        var useCase=withAgreementPolicy("");
+        assertCode(()->tx.execute(s->useCase.save(user,sample(UUID.randomUUID()))),ErrorCode.LOCATION_CONSENT_REQUIRED);
+        assertThat(api.queryForObject("SELECT count(*) FROM parking_events",Integer.class)).isZero();
+    }
+    @Test void currentVersionChangeRechecksConsentBeforeIdempotentReplayWithoutReevaluation() {
+        var request=sample(UUID.randomUUID());
+        var first=save(request);
+        var rotated=withAgreementPolicy("parking-next-version,parking-test-version");
+        assertCode(()->tx.execute(s->rotated.save(user,request)),ErrorCode.LOCATION_CONSENT_REQUIRED);
+        assertThat(store.assessment(first.parkingEventId())).isEqualTo(first.assessment());
+        owner.update("INSERT INTO user_agreements(user_id,agreement_type,version,action) VALUES (?,'LOCATION_SERVICE','parking-next-version','AGREE')",user);
+        owner.update("UPDATE vehicles SET deleted_at=now() WHERE id=?",vehicle);
+        owner.update("UPDATE notification_settings SET caution_enabled=false,night_enabled=false WHERE user_id=?",user);
+        var replay=tx.execute(s->rotated.save(user,request));
+        assertThat(replay.created()).isFalse();
+        assertThat(ParkingResponse.from(replay)).isEqualTo(ParkingResponse.from(first));
+        assertThat(api.queryForObject("SELECT count(*) FROM parking_events",Integer.class)).isEqualTo(1);
+        assertThat(api.queryForObject("SELECT count(*) FROM location_access_logs WHERE parking_event_id=?",Integer.class,first.parkingEventId())).isEqualTo(1);
     }
     void assertCode(Runnable action,ErrorCode code) { assertThatThrownBy(action::run).isInstanceOf(BusinessException.class).extracting(e->((BusinessException)e).getErrorCode()).isEqualTo(code); }
     static String required(String key) { String v=System.getenv(key); if (v==null || v.isBlank()) throw new IllegalStateException("Missing isolated parking test input: "+key); return v; }

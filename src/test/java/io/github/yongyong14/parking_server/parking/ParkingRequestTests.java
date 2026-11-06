@@ -49,8 +49,8 @@ class ParkingRequestTests {
         assertCode(request(time,time,ParkingRequest.Method.CONFIRMED,new ParkingRequest.Gps(BigDecimal.ZERO,BigDecimal.ZERO,new BigDecimal("1E999")),null,BigDecimal.ZERO,0),ErrorCode.INVALID_INPUT);
     }
     @Test void unconfiguredAgreementVersionsFailClosed() {
-        assertThat(new AgreementPolicy(Set.of()).acceptsLocationVersion("2026-11-01")).isFalse();
-        assertThat(new AgreementPolicy(Set.of("explicit-test")).acceptsLocationVersion("explicit-test")).isTrue();
+        assertThat(new AgreementPolicy("").acceptsLocationVersion("2026-11-01")).isFalse();
+        assertThat(new AgreementPolicy("explicit-test").acceptsLocationVersion("explicit-test")).isTrue();
     }
     @Test void compactDecimalCanonicalizationPreservesNumericEqualityAndZero() {
         for (String[] equivalents:new String[][]{{"1","1.0","1e0","1.0000"},{"0","0.0","-0.00","0e-1000000","0e+1000000"}}) {

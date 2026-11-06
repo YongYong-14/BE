@@ -60,6 +60,8 @@ try {
     $start.EnvironmentVariables['PARKING_TEST_JDBC_URL'] = "jdbc:postgresql://127.0.0.1:$port/parking_event_verify"
     $start.EnvironmentVariables['PARKING_TEST_PASSWORD'] = $password
     $start.EnvironmentVariables['PARKING_TEST_IDENTITY'] = $identity
+    # Explicit isolated fixture only. Never inherit deployment agreement versions from the parent.
+    $start.EnvironmentVariables['AUTH_LOCATION_VERSIONS'] = 'parking-test-version'
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $start
     if (!$process.Start()) { throw 'Cannot start parking-event test Gradle process.' }
@@ -71,7 +73,7 @@ try {
     if ($process.ExitCode -ne 0) { throw "ParkingEvent tests failed; see $report/gradle.log" }
     $results = Join-Path $repo 'build/test-results/postgresTest/TEST-io.github.yongyong14.parking_server.parking.ParkingPostgresTest.xml'
     [xml]$xml = [IO.File]::ReadAllText($results)
-    if ([int]$xml.testsuite.tests -lt 26 -or [int]$xml.testsuite.failures -ne 0 -or
+    if ([int]$xml.testsuite.tests -lt 31 -or [int]$xml.testsuite.failures -ne 0 -or
         [int]$xml.testsuite.errors -ne 0 -or [int]$xml.testsuite.skipped -ne 0) {
         throw 'Expected parking-event integration tests.'
     }

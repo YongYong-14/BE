@@ -145,7 +145,7 @@ GPS 정확도에 따른 등급 정책은 미결이다. v0.8의 임시 정책대�
 
 | 소유/설정 | 연결 계약 |
 | --- | --- |
-| 계정: `app.agreements.location-service.accepted-versions` | 허용 버전 집합. `AgreementPolicy` 한 곳에서 관리. 운영 기본 버전 없음. 비어 있으면 모든 위치 요청을 403으로 거절한다. 테스트에는 `parking-test-version`을 명시한다. |
+| 계정: `app.account.location-versions` ← `AUTH_LOCATION_VERSIONS` | 순서 있는 쉼표 구분 목록. 첫 값만 현재 버전이며 `AgreementPolicy`는 이 값과 최신 AGREE를 비교한다. 기본 약관 버전 없음. 빈 설정이면 모든 위치 요청을 403으로 거절한다. |
 | 데이터/운영: `app.parking.rule-set` | 공개된 실제 zone_rule_sets.rule_set. 최신 날짜나 임의 이름을 자동 선택하지 않는다. 기본값 없이 실행 시 검사한다. |
 | 데이터/기획: `app.parking.facility-priority` | 시설이 여러 유형에 걸릴 때의 합의된 우선순위 목록. 기본 순위 없음. 미설정이면 겹친 건은 FAILED/FACILITY_PRIORITY_UNCONFIGURED. 테스트의 HYDRANT,BUS_STOP은 fixture 설정이다. 같은 유형은 거리→시설 UUID로 결정한다. |
 | 데이터: 활성 prediction_versions | ID·버전명·caution_top_percent를 매번 선택된 활성 행에서 읽는다. 베이스라인/LightGBM 조회 경로가 같다. |
@@ -173,6 +173,40 @@ percentile_basis와 GE_SHARE 동점 정책도 버전의 계산 결과를 그대�
 계정 담당 구현은 아직 없으며 AgreementPolicy·최소 최신 동의 조회와 기존 notification_settings 테이블을 재사용한다.
 별도 User 엔티티·알림 설정 CRUD·중복 약관 버전 설정은 만들지 않았다. 알림 설정 행이 필요한데 없으면
 가입 불변식 오류로 전체 롤백/500이며 true/false 기본 행을 생성하거나 추측하지 않는다.
+
+### #22와 위치 동의 버전 계약 통일
+
+**위치 동의 현재 버전은 계정 모듈 설정 AUTH_LOCATION_VERSIONS의 첫 값이며,
+시연 환경에는 합의된 현재 버전 하나만 넣는다.** 실제 버전값은 계정 담당자·앱과 합의해야 하며 임의 기본값은 없다.
+`application.yaml`의 단일 `app.account.location-versions: ${AUTH_LOCATION_VERSIONS:}` 연결을 사용한다.
+`AgreementPolicy`는 항목 앞뒤 공백과 빈 항목을 제거하고 중복을 최초 등장 순서대로 제거한 List로 파싱한다.
+빈 설정·null·미등록 버전뿐 아니라 목록의 두 번째 이후 버전도 현재 위치 동의로는 인정하지 않는다.
+이전 설정 경로를 대체 경로로 읽지 않는다.
+종전의 순서 없는 집합에 포함되기만 하면 위치 동의를 인정하던 판단을 첫 값 기준으로 변경했다.
+
+[재원님 #22](https://github.com/YongYong-14/BE/pull/22)의 head
+`9c8fd0955f7c218d29f9bca93aae33592f9d01ad`에서 다음 실제 구현을 읽기 전용으로 대조했다.
+
+- `AgreementService`는 같은 설정 키의 문자열을 `trim → 빈 항목 제거 → distinct → List`로 파싱한다.
+  계정 API의 **AGREE 접수**는 목록 전체에 포함된 버전을 허용한다.
+- `AgreementService.acceptedCurrent`는 목록 첫 값과 같은 버전의 최신 AGREE만 현재 동의로 인정한다.
+  주차 API의 `acceptsLocationVersion`은 이 현재 버전 판단에 해당하며 접수 허용 목록 검사와 다르다.
+- `UserAgreementRepository.findLatestByType`은 유형별 최대 id 이벤트를 선택한다.
+  현재 주차 코드의 사용자 FOR SHARE → LOCATION_SERVICE의 id DESC LIMIT 1 조회도 같은 최신 이벤트를 고른다.
+  최신 WITHDRAW나 이전 버전 AGREE를 건너뛰어 과거 현재 버전 AGREE를 허용하지 않는다.
+- #22의 `application.yaml`도 AUTH_LOCATION_VERSIONS를 같은 키에 연결한다. 설명된 목표 계약과 실제 구현의 차이는 없다.
+  단, #22는 위치 철회·파기 정책 미결로 해당 계정 API 요청을 503 처리한다. 주차의 기존 WITHDRAW 거부는 유지한다.
+
+#22 코드는 수정·병합하지 않았고 계정 서비스·동의 API도 현재 브랜치에 복제하지 않았다.
+**#22와의 코드 통합은 아직 완료되지 않았다.** 이후 #22가 dev에 머지되면 최신 dev 반영 시 충돌을 다시 확인한다.
+설정 병합 때 `app`·`account` YAML 키나 location-versions 연결을 중복 선언하지 않고
+#22의 다른 account 설정과 현재의 독립된 kakao.local 설정을 함께 보존해야 한다.
+`OpenApiTests.java`의 현재 검증은 변경하지 않는다. 향후 통합 시 양쪽 API·보안·응답 검증을 모두 보존하고
+API 개수만 맞추기 위해 검증을 삭제하지 않는다.
+
+현재 버전을 바꾸면 기존 주차 재요청도 최신 동의부터 다시 확인하므로 새 현재 버전에 동의하기 전에는 403이다.
+새 버전에 AGREE한 뒤 같은 키를 재요청하면 기존 차량·알림 설정과 관계없이 저장된 판정을 그대로 반환한다.
+계정 담당 코드의 실제 통합 검증은 아직 남아 있다.
 
 ## 알림 결정과 문구
 
@@ -243,6 +277,8 @@ PostgreSQL fixture는 완전한 56조합을 적재해 실제 freeze/activate 함
 MISSING_ROW는 조회 경계의 테스트 대역으로 주입하며 동결 가드를 끄거나 실제 동결 행을 훼손하지 않는다.
 보고서는 `build/parking-event-verification/<고유 컨테이너>/`에 남고 자신의 컨테이너만 정지한다.
 이 새 PowerShell 실행기는 Windows용이며 Mac에서는 미검증이다.
+자식 JVM의 AUTH_LOCATION_VERSIONS는 격리 fixture인 `parking-test-version` 하나로 명시한다.
+부모의 배포용 약관 목록을 상속하지 않으며 환경 초기화·OS 변수 허용 목록·임시 DB 식별 검사는 유지한다.
 
 남은 실제 연동은 공유 DB의 버전명/ID·원시 백분위·시설·최종 판정 확인, 합의된 약관 버전·공개 규칙·
 시설 우선순위 설정 제공, 실제 Kakao 키와 네트워크 확인이다. 자동 테스트는 외부 호출을 대체한다.
@@ -307,3 +343,20 @@ MISSING_ROW는 조회 경계의 테스트 대역으로 주입하며 동결 가�
   미래 허용과 시간 순서·마지막 위치 나이의 검증도 절삭된 값 기준으로 테스트했다.
 - 실제 공유 데이터·카카오 키/외부 호출·계정 담당 코드와의 통합 미검증 상태는 유지한다.
   기존 Flyway·DBML을 수정하지 않았고 개발/공유 DB·기존 볼륨을 사용하지 않았다.
+
+### #22 위치 동의 설정 정합성 검증 (2026-11-06)
+
+- `test compilePostgresTestJava --no-daemon`: 성공. 일반 테스트 90개, 실패·오류·skip 0.
+  AgreementPolicy 단위·YAML 바인딩 테스트 5개를 포함한다. 가상 환경변수만 사용하는 별도 Spring
+  컨텍스트에서 AUTH_LOCATION_VERSIONS → 실제 application.yaml → Policy 전달과 빈 기본값을 확인했다.
+- 기존 격리 실행기: PostgreSQL/PostGIS 통합 테스트 31개, 실패·오류·skip 0.
+  보고서: `build/parking-event-verification/parking-parking-event-a01ed495a9/`.
+- 새 동의 테스트 5개는 최신 현재 버전 AGREE 통과, 최신 이전 버전 AGREE 거부,
+  최신 WITHDRAW의 과거 AGREE 복귀 금지, 빈 설정 거부, 버전 교체 뒤 재동의 전 403 및
+  재동의 후 기존 이벤트·판정·알림·시도 횟수 유지 여부를 실제 API 역할 연결로 검증한다.
+- 첫 DB 실행은 테스트용 이전 버전 이름이 기존 varchar(20)을 넘어 실패했다.
+  fixture 이름만 제약 범위 안으로 수정한 뒤 전부 통과했다. 스키마를 변경하거나 오류를 무시하지 않았다.
+- main/test/postgresTest/docs/scripts/application YAML/.env.example 범위의 이전 설정 키 참조는 rg 결과 0건이다.
+  실제 .env는 읽거나 수정하지 않았고 새 합의 버전값을 임의로 지정하지 않았다.
+- 주차 트랜잭션·사용자 잠금·최신 이벤트 조회·위험/알림 정책·좌표/시각 정규화 및 OpenApiTests.java는 변경하지 않았다.
+  #22는 원격 head의 코드를 읽기만 했으며 병합·수정하지 않았다. 통합은 후속 dev 반영 시 재확인한다.
