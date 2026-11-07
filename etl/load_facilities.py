@@ -12,7 +12,8 @@
 - 같은 종류의 새 파일을 넣으면 그 import가 활성화되고 이전 것은 비활성화된다 (API는 활성 import만 조회).
 - 용인시 것만 넣는다. 좌표가 용인 범위를 벗어나면 버린다.
 - 소화전·버스정류소는 적재 후 zone_types.has_facility_data = true (1단계 규칙 판정 가능).
-- 어린이보호구역은 '학교 등 시설의 점 좌표'뿐이고 구역 경계(면)가 아니어서 has_facility_data는 false로 둔다.
+- 어린이보호구역은 시설(학교 등)의 점 좌표다. 11/6 회의 결정: 주 출입문 기준 반경 300m로 판정
+  (법: 반경 300m 이내 도로 중 일정 구간을 지정) → has_facility_data = true. 반경 값은 zone_rules가 가진다.
 """
 from __future__ import annotations
 
@@ -132,7 +133,7 @@ SOURCES = {
     # 인자이름: (source_dataset, 변환함수, 적재 후 has_facility_data를 true로 바꿀지)
     "hydrant": ("facility_hydrant_yongin", hydrant_rows, True),
     "bus": ("facility_bus_stop_molit", bus_rows, True),
-    "school": ("facility_school_zone_yongin", school_rows, False),
+    "school": ("facility_school_zone_yongin", school_rows, True),   # 회의 결정: 300m 판정
 }
 
 
@@ -146,6 +147,9 @@ def load_one(cur, path: Path, source_dataset: str, rows: pd.DataFrame, report: d
         cur.execute("SELECT count(*) FROM facilities WHERE import_id = %s", (imp,))
         if cur.fetchone()[0]:
             print(f"  이미 적재된 파일이라 건너뜀 (import {imp})")
+            if flip:   # 판정 가능 여부는 정책이 바뀔 수 있어 건너뛰어도 맞춰 둔다
+                cur.execute("UPDATE zone_types SET has_facility_data = true WHERE zone_type = %s",
+                            (report["zone_type"],))
             return
     else:
         imp = uuid.uuid4()
