@@ -152,10 +152,13 @@ def load_records(cur, imp: uuid.UUID, out_dir: Path, total_rows: int, reload: bo
         print(f"  enforcement_records: {len(df):,}행 적재")
 
     # 지번 좌표 복사 (지번 좌표가 바뀌었을 수 있으니 매번 다시 연결)
+    # AMBIGUOUS(같은 지번이 여러 곳에서 검색됨)는 위치가 틀렸을 수 있어 좌표를 쓰지 않는다 → 통계·예측에서 빠짐.
+    # 참고용 첫 번째 좌표는 geocoded_parcels에만 남는다.
     cur.execute(
         """UPDATE enforcement_records e
-              SET location = p.location,
-                  location_precision = CASE WHEN p.location IS NULL THEN 'NONE' ELSE p.match_level END,
+              SET location = CASE WHEN p.status = 'AMBIGUOUS' THEN NULL ELSE p.location END,
+                  location_precision = CASE WHEN p.location IS NULL OR p.status = 'AMBIGUOUS' THEN 'NONE'
+                                            ELSE p.match_level END,
                   grid_id = NULL
              FROM geocoded_parcels p
             WHERE e.import_id = %s AND e.parcel_id = p.id""", (imp,))
@@ -169,7 +172,11 @@ def load_records(cur, imp: uuid.UUID, out_dir: Path, total_rows: int, reload: bo
                   count(*) FILTER (WHERE is_citizen_report AND grid_id IS NOT NULL)
              FROM enforcement_records WHERE import_id = %s""", (imp,))
     c, loc, grid = cur.fetchone()
-    print(f"  시민 신고 {c:,}행 → 좌표 {loc:,}행 → 용인 칸 연결 {grid:,}행")
+    cur.execute(
+        """SELECT count(*) FROM enforcement_records e JOIN geocoded_parcels p ON p.id = e.parcel_id
+            WHERE e.import_id = %s AND e.is_citizen_report AND p.status = 'AMBIGUOUS'""", (imp,))
+    amb = cur.fetchone()[0]
+    print(f"  시민 신고 {c:,}행 → 좌표 {loc:,}행 → 용인 칸 연결 {grid:,}행 (AMBIGUOUS {amb:,}행 제외)")
 
 
 def build_stats(cur, imp: uuid.UUID) -> None:
@@ -221,8 +228,9 @@ def build_stats(cur, imp: uuid.UUID) -> None:
 
 
 def activate_import(cur, imp: uuid.UUID, report: dict) -> None:
-    cur.execute("SELECT count(*) FILTER (WHERE status IN ('SUCCEEDED','AMBIGUOUS')), "
-                "count(*) FILTER (WHERE status = 'FAILED') FROM geocoded_parcels")
+    # AMBIGUOUS는 좌표를 쓰지 않으므로 실패 쪽으로 센다
+    cur.execute("SELECT count(*) FILTER (WHERE status = 'SUCCEEDED'), "
+                "count(*) FILTER (WHERE status IN ('FAILED', 'AMBIGUOUS')) FROM geocoded_parcels")
     ok, failed = cur.fetchone()
     cur.execute("UPDATE data_imports SET active = false WHERE source_dataset = %s AND id <> %s AND active",
                 (SOURCE_DATASET, imp))

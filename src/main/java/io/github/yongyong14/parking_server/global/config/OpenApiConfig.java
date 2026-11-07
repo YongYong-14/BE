@@ -19,6 +19,8 @@ public class OpenApiConfig {
     @Bean
     OpenAPI openAPI() {
         var components = new Components();
+        components.addSecuritySchemes("bearerAuth", new io.swagger.v3.oas.models.security.SecurityScheme()
+                .type(io.swagger.v3.oas.models.security.SecurityScheme.Type.HTTP).scheme("bearer").bearerFormat("JWT"));
         var error = new ObjectSchema()
                 .addProperty("code", new StringSchema())
                 .addProperty("message", new StringSchema());
@@ -62,6 +64,15 @@ public class OpenApiConfig {
             // Only this explicitly owned schema is replaced; repeated calls are identical.
             api.getComponents().addSchemas("HealthSuccess", success);
         };
+    }
+
+    @Bean
+    OpenApiCustomizer operationSecurity() {
+        return api -> api.getPaths().forEach((path, item) -> item.readOperationsMap().forEach((method, operation) -> {
+            if (io.github.yongyong14.parking_server.global.security.SecurityConfig.publicApi(method.name(), path))
+                operation.setSecurity(List.of());
+            else operation.setSecurity(List.of(new io.swagger.v3.oas.models.security.SecurityRequirement().addList("bearerAuth")));
+        }));
     }
 
     private static Schema<Object> nullSchema() {

@@ -21,3 +21,7 @@ spring:
     baseline-on-migrate: false
     clean-disabled: true
     placeholder-replacement: false
+
+app:
+  security:
+    swagger-public: true

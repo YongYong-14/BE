@@ -2,6 +2,8 @@
 
 ## Git Convention
 
+인증 공통 모듈 연결·환경변수·현재 사용자 UUID 사용법은 [인증 가이드](docs/AUTHENTICATION.md)를 참고한다.
+
 ### 브랜치
 - `main`: 배포용 브랜치
 - `dev`: 개발 통합 브랜치

@@ -3,8 +3,22 @@ package io.github.yongyong14.parking_server.global.exception;
 import org.springframework.http.HttpStatus;
 
 public enum ErrorCode {
+    PARKING_EVENT_NOT_FOUND("PARKING_EVENT_NOT_FOUND", HttpStatus.NOT_FOUND, "주차 기록을 찾을 수 없습니다."),
+    DELIVERY_NOT_EXPECTED("DELIVERY_NOT_EXPECTED", HttpStatus.CONFLICT, "알림 표시 보고 대상이 아닙니다."),
+    VEHICLE_NOT_FOUND("VEHICLE_NOT_FOUND", HttpStatus.NOT_FOUND, "활성 차량을 찾을 수 없습니다."),
+    LOCATION_CONSENT_REQUIRED("LOCATION_CONSENT_REQUIRED", HttpStatus.FORBIDDEN, "위치기반서비스 동의가 필요합니다."),
+    IDEMPOTENCY_KEY_REUSED("IDEMPOTENCY_KEY_REUSED", HttpStatus.CONFLICT, "같은 요청 키에 다른 내용이 전달되었습니다."),
+    INVALID_TIME("INVALID_TIME", HttpStatus.BAD_REQUEST, "감지 시각을 확인해 주세요."),
+    INVALID_TIME_ORDER("INVALID_TIME_ORDER", HttpStatus.BAD_REQUEST, "확정 시각을 확인해 주세요."),
+    AUTO_CONFIRM_NOT_ALLOWED("AUTO_CONFIRM_NOT_ALLOWED", HttpStatus.BAD_REQUEST, "GPS 없이 자동 확정할 수 없습니다."),
+    ADJUST_DISTANCE_EXCEEDED("ADJUST_DISTANCE_EXCEEDED", HttpStatus.BAD_REQUEST, "위치 보정 범위를 초과했습니다."),
+    INVALID_BLUETOOTH_ADDRESS("INVALID_BLUETOOTH_ADDRESS", HttpStatus.BAD_REQUEST, "블루투스 주소 형식을 확인해 주세요."),
+    VEHICLE_CONFLICT("VEHICLE_CONFLICT", HttpStatus.CONFLICT, "차량 정보가 변경되었습니다. 다시 조회한 뒤 재시도해 주세요."),
     INVALID_INPUT("INVALID_INPUT", HttpStatus.BAD_REQUEST, "입력값을 확인해 주세요."),
     UNAUTHORIZED("UNAUTHORIZED", HttpStatus.UNAUTHORIZED, "인증이 필요합니다."),
+    KAKAO_TOKEN_INVALID("KAKAO_TOKEN_INVALID", HttpStatus.UNAUTHORIZED, "카카오 인증 토큰을 확인해 주세요."),
+    TOKEN_REUSED("TOKEN_REUSED", HttpStatus.UNAUTHORIZED, "다시 로그인해 주세요."),
+    TOKEN_EXPIRED("TOKEN_EXPIRED", HttpStatus.UNAUTHORIZED, "토큰이 만료되었습니다."),
     FORBIDDEN("FORBIDDEN", HttpStatus.FORBIDDEN, "접근 권한이 없습니다."),
     NOT_FOUND("NOT_FOUND", HttpStatus.NOT_FOUND, "요청한 리소스를 찾을 수 없습니다."),
     METHOD_NOT_ALLOWED("METHOD_NOT_ALLOWED", HttpStatus.METHOD_NOT_ALLOWED, "지원하지 않는 HTTP 메서드입니다."),

@@ -18,9 +18,14 @@ repositories {
 }
 
 dependencies {
+	implementation 'org.springframework.boot:spring-boot-starter-security'
+	implementation 'io.jsonwebtoken:jjwt-api:0.13.0'
+	runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.13.0'
+	runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.13.0'
+	testImplementation 'org.springframework.security:spring-security-test'
 	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
 	implementation 'org.springframework.boot:spring-boot-starter-flyway'
-	runtimeOnly 'org.postgresql:postgresql'
+	implementation 'org.postgresql:postgresql'
 	runtimeOnly 'org.flywaydb:flyway-database-postgresql'
 	implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.2.0'
 	implementation 'org.springframework.boot:spring-boot-starter-validation'
@@ -36,4 +41,30 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
+}
+
+// Opt-in PostgreSQL verification, following the existing scripts/db isolation workflow.
+// Not attached to test/check/build: normal tests do not require Docker.
+sourceSets {
+	postgresTest {
+		compileClasspath += sourceSets.main.output
+		runtimeClasspath += sourceSets.main.output
+	}
+}
+
+configurations {
+	postgresTestImplementation.extendsFrom testImplementation
+	postgresTestRuntimeOnly.extendsFrom testRuntimeOnly
+	postgresTestCompileOnly.extendsFrom testCompileOnly
+	postgresTestAnnotationProcessor.extendsFrom testAnnotationProcessor
+}
+
+tasks.register('postgresTest', Test) {
+	description = 'Runs auditing tests against an explicitly provisioned isolated PostgreSQL DB.'
+	group = 'verification'
+	testClassesDirs = sourceSets.postgresTest.output.classesDirs
+	classpath = sourceSets.postgresTest.runtimeClasspath
+	useJUnitPlatform()
+	// Always attest and verify the fresh database, even if a prior report exists.
+	outputs.upToDateWhen { false }
 }

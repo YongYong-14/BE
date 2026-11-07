@@ -111,6 +111,13 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         }
     }
 
+    @ExceptionHandler(org.springframework.security.access.AccessDeniedException.class)
+    public ResponseEntity<Object> handleAccessDenied(org.springframework.security.access.AccessDeniedException exception) {
+        ErrorCode code = ErrorCode.FORBIDDEN;
+        return ResponseEntity.status(code.getStatus()).contentType(MediaType.APPLICATION_JSON)
+                .body(ApiResponse.failure(code.getCode(), code.getMessage()));
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Object> handleUnexpectedException(Exception exception) {
         ErrorCode code = ErrorCode.INTERNAL_SERVER_ERROR;

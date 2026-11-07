@@ -12,7 +12,7 @@ pytest etl/tests
 
 ```bash
 python etl/parse_enforcement.py \
-  --input "data/raw/경기도_용인시_주정차단속현황_20251115.csv" \
+  --input "data/raw/경기도 용인시_주정차단속현황_20251115.csv" \
   --out etl/out
 ```
 

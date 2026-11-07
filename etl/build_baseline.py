@@ -102,13 +102,16 @@ def baseline_table(targets: pd.DataFrame, agg: pd.DataFrame, days: dict[int, int
 
 def evaluate(targets: pd.DataFrame, agg_train: pd.DataFrame, agg_valid: pd.DataFrame,
              days_train: dict[int, int], days_valid: dict[int, int]) -> dict:
-    """1~7월 표로 8/1~9/25를 맞히는 정도 (시간 순 분할)"""
+    """1~7월 표로 8/1~9/25를 맞히는 정도 (시간 순 분할)
+
+    targets는 7/31까지 신고된 지번 기준 칸이어야 한다 (검증 기간 위치를 미리 알면 안 됨).
+    그 밖에서 나온 8/1~9/25 신고는 '놓친 것'으로 분모에 넣는다."""
     pred = baseline_table(targets, agg_train, days_train)
     v = agg_valid[["grid_id", "weekday", "time_slot", "report_count"]].rename(columns={"report_count": "y"})
     m = pred.merge(v, on=["grid_id", "weekday", "time_slot"], how="left").fillna({"y": 0})
     m["mu"] = m["smoothed_count"] * m["weekday"].map(days_valid)
 
-    total = m["y"].sum()
+    total = float(agg_valid["report_count"].sum())   # 검증 기간 신고 전체 (대상 칸 밖 포함)
     flagged = m["top_percent"] <= CAUTION_TOP_PERCENT
     # 비교 기준(아무 정보 없음): 같은 요일·시간대 평균을 모든 칸에 똑같이
     m["mu0"] = m.groupby(["weekday", "time_slot"])["y"].transform("mean")
@@ -123,7 +126,9 @@ def evaluate(targets: pd.DataFrame, agg_train: pd.DataFrame, agg_valid: pd.DataF
     return {
         "split": {"train": [str(PERIODS["train"][0]), str(PERIODS["train"][1])],
                   "valid": [str(PERIODS["valid"][0]), str(PERIODS["valid"][1])]},
-        "valid_reports_in_targets": int(total),
+        "eval_targets": "7/31까지 신고 지번 기준 칸, 대상 밖 신고는 놓친 것으로 계산",
+        "valid_reports_total": int(total),
+        "valid_reports_in_targets": int(m["y"].sum()),
         "flagged_cell_share": round(float(flagged.mean()), 4),
         "capture_at_caution": round(float(m.loc[flagged, "y"].sum() / total), 4) if total else None,
         "poisson_deviance": round(d_model, 1),
@@ -155,13 +160,24 @@ def fetch_inputs(cur):
                       AND g.grid_x = t.grid_x AND g.grid_y = t.grid_y AND g.in_model_area""", (CELL,))
     targets = pd.DataFrame(cur.fetchall(), columns=["grid_id", "grid_x", "grid_y"])
 
+    # 평가용 대상 칸: 학습 기간(7/31)까지 신고된 지번만으로 뽑는다 (리뷰 반영: 검증 기간 위치 누수 방지)
+    cur.execute("""SELECT DISTINCT ST_X(ST_Transform(e.location::geometry, 5186)),
+                                   ST_Y(ST_Transform(e.location::geometry, 5186))
+                     FROM enforcement_records e
+                    WHERE e.import_id = %s AND e.is_citizen_report AND e.location IS NOT NULL
+                      AND e.location_precision IN ('PARCEL', 'ROAD')
+                      AND (e.enforced_at AT TIME ZONE 'Asia/Seoul')::date BETWEEN %s AND %s""",
+                (imp, PERIODS["train"][0], PERIODS["train"][1]))
+    train_cells = candidate_cells(np.array(cur.fetchall(), dtype=float), TARGET_RADIUS_M)
+    targets_eval = targets[[c in train_cells for c in zip(targets["grid_x"], targets["grid_y"])]].reset_index(drop=True)
+
     cur.execute("""SELECT grid_id, weekday, time_slot, period_start, period_end, report_count
                      FROM report_aggregates WHERE import_id = %s""", (imp,))
     agg = pd.DataFrame(cur.fetchall(), columns=["grid_id", "weekday", "time_slot", "ps", "pe", "report_count"])
 
     cur.execute("SELECT holiday_date FROM holidays")
     holidays = {r[0] for r in cur.fetchall()}
-    return imp, len(points), targets, agg, holidays
+    return imp, len(points), targets, targets_eval, agg, holidays
 
 
 def write_version(cur, imp, args, targets: pd.DataFrame, table: pd.DataFrame, metrics: dict) -> uuid.UUID:
@@ -194,15 +210,16 @@ def main() -> None:
     args = ap.parse_args()
 
     with connect() as conn, conn.cursor() as cur:
-        imp, n_points, targets, agg, holidays = fetch_inputs(cur)
-        print(f"신고 지번 {n_points:,}개 → 대상 칸 {len(targets):,}개 (× 56 = {len(targets) * 56:,}행)")
+        imp, n_points, targets, targets_eval, agg, holidays = fetch_inputs(cur)
+        print(f"신고 지번 {n_points:,}개 → 대상 칸 {len(targets):,}개 (× 56 = {len(targets) * 56:,}행), "
+              f"평가용 {len(targets_eval):,}개")
 
         def period(name):
             ps, pe = PERIODS[name]
             return agg[(agg["ps"] == ps) & (agg["pe"] == pe)], day_counts(ps, pe, holidays)
 
         (a_full, d_full), (a_tr, d_tr), (a_va, d_va) = period("full"), period("train"), period("valid")
-        metrics = evaluate(targets, a_tr, a_va, d_tr, d_va)
+        metrics = evaluate(targets_eval, a_tr, a_va, d_tr, d_va)
         metrics["days_full"] = d_full
         print("평가(1~7월 → 8/1~9/25):", json.dumps(metrics, ensure_ascii=False))
 
@@ -214,6 +231,9 @@ def main() -> None:
             return
 
         vid = write_version(cur, imp, args, targets, table, metrics)
+        # 방금 넣은 수백만 행은 통계가 없어 검증(freeze)이 매우 느린 계획을 고른다 → 막아 둔다
+        cur.execute("SET LOCAL enable_nestloop = off")
+        cur.execute("SET LOCAL work_mem = '256MB'")
         cur.execute("SELECT freeze_prediction_version(%s)", (vid,))
         if args.activate:
             cur.execute("SELECT activate_prediction_version(%s)", (vid,))
