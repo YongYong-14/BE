@@ -31,7 +31,12 @@ class OpenApiTests {
         assertThat(doc.at("/info/title").asText()).isEqualTo("용인 주차 안내 서비스 API");
         assertThat(doc.at("/info/version").asText()).isEqualTo("v1");
         assertThat(doc.has("success")).isFalse();
-        assertThat(doc.path("paths").size()).isEqualTo(9);
+        for (String path : new String[]{"/api/v1/health", "/api/v1/vehicle",
+                "/api/v1/auth/kakao", "/api/v1/auth/refresh", "/api/v1/auth/logout",
+                "/api/v1/me", "/api/v1/me/agreements", "/api/v1/notification-settings",
+                "/api/v1/webhooks/kakao/unlink", "/api/v1/map/risk-zones", "/api/v1/parking-events"}) {
+            assertThat(doc.path("paths").has(path)).as("Required API path %s", path).isTrue();
+        }
         assertThat(doc.at("/paths/~1api~1v1~1auth~1kakao/post/security").isEmpty()).isTrue();
         assertThat(doc.at("/paths/~1api~1v1~1me/get/security/0/bearerAuth").isArray()).isTrue();
         assertThat(doc.at("/paths/~1api~1v1~1me/delete/responses/204").isObject()).isTrue();

@@ -15,7 +15,29 @@ springdoc:
   packages-to-scan: io.github.yongyong14.parking_server
   override-with-generic-response: false
 
+# Keep URL/query, rejected values and invocation arguments out of ordinary DEBUG diagnostics.
+# Explicit overrides of these individual loggers and external proxy logs remain deployment concerns.
+logging:
+  level:
+    org.springframework.security.web.FilterChainProxy: INFO
+    org.springframework.web.servlet.DispatcherServlet: INFO
+    org.springframework.web.servlet.mvc.method.annotation.ExceptionHandlerExceptionResolver: INFO
+    org.springframework.web.servlet.mvc.support.DefaultHandlerExceptionResolver: INFO
+    org.springframework.web.method.support.InvocableHandlerMethod: INFO
+    org.springframework.web.method.HandlerMethod: INFO
+    org.springframework.web.servlet.mvc.method.annotation.RequestResponseBodyMethodProcessor: INFO
+
+# No access log by default. If enabled, %U is the path only; never add %q or %r.
+server:
+  tomcat:
+    accesslog:
+      enabled: false
+      pattern: '%h %l %u %t "%m %U %H" %s %b'
+
 app:
+  kakao:
+    local:
+      rest-api-key: ${KAKAO_LOCAL_REST_API_KEY:}
   auth:
     issuer: ${JWT_ISSUER}
     secret-base64: ${JWT_SECRET_BASE64}

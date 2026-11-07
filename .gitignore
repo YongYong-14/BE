@@ -40,3 +40,10 @@ out/
 .env
 .env.*
 !.env.example
+
+# Local database snapshots and extracted verification data; retain originals locally.
+*.dump
+*.backup
+*.sql.gz
+*.dump.gz
+*.dump.tar
