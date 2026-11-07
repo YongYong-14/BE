@@ -35,6 +35,11 @@ server:
       pattern: '%h %l %u %t "%m %U %H" %s %b'
 
 app:
+  account:
+    location-versions: ${AUTH_LOCATION_VERSIONS:}
+  kakao:
+    local:
+      rest-api-key: ${KAKAO_LOCAL_REST_API_KEY:}
   auth:
     issuer: ${JWT_ISSUER}
     secret-base64: ${JWT_SECRET_BASE64}
