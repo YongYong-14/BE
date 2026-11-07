@@ -47,3 +47,6 @@ out/
 *.sql.gz
 *.dump.gz
 *.dump.tar
+
+# 원본 데이터(단속 CSV, 시설 CSV, 경계 SHP)는 공개 저장소에 올리지 않는다
+data/raw/
