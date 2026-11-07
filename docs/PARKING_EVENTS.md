@@ -1,9 +1,141 @@
 # 이슈 #17: 주차 저장·위험 판정 API
 
+## 이슈 #25 조회·알림 표시 결과 보고
+
+`feat/25-parking-event-queries`에서 아래 4개 API를 구현했다.
+최신 DOCX의 파일명뿐 아니라 본문 v0.10 2·4·5·8절, DBML v5.1과 실제 Flyway V1~V5를 대조했다.
+명세와 충돌하는 정책은 발견하지 않았다. 미정이었던 항목은 아래 백엔드 기본안으로 보완한다.
+
+- `GET /api/v1/parking-events/latest`: 본인의 최근 기록. `detectedAt DESC, id DESC`로 선택한다.
+  `event`는 id, detectedAt, confirmedLocation(lat/lng), address, vehicleName(저장 당시 차량명)을 포함한다.
+  assessment는 status, level, predictionStatus 요약이다. 기록이 없으면 event와 assessment는 명시적 null이다.
+  dataPeriod는 현재 활성 prediction_versions의 training_start/observed_end를 start/end로 반환한다.
+  기록 유무와 무관하며 활성 버전이 없으면 null이다. 과거 판정을 재계산하지 않는다.
+- `GET /api/v1/parking-events/{id}`: 본인 event와 POST와 같은 저장 assessment.
+  stats에 상세 전용 peak를 추가한다. POST 응답은 변경하지 않는다.
+  타인·없는 기록은 404 PARKING_EVENT_NOT_FOUND, 잘못된 UUID는 400 INVALID_INPUT이다.
+- `GET /api/v1/parking-events?level=ALL&limit=50`: ALL/1/2, limit 1~100.
+  본인 기록을 detectedAt DESC, id DESC로 반환하며 빈 목록은 items: []이다.
+  ALL은 PARTIAL/FAILED/3단계를 포함한다. 목록은 대표 근거를 조인하는 단일 SELECT로 N+1을 피한다.
+  응답 항목은 명세 4절의 event(id/detectedAt/address)와 assessment 요약을 따른다.
+- `PATCH /api/v1/parking-events/{id}/delivery`: 알림 표시 결과를 보고하며 204, 본문 없음.
+
+위 API는 기존 JWT와 @CurrentUser를 사용한다. 명세 2절·5절·8절 #15는 위치 동의 검사를
+POST /parking-events와 GET /parking-lots/nearby에 적용한다. 이번 latest/상세/목록/delivery는
+위치를 입력받거나 저장하지 않으므로 추가 동의 검사·위치 이용 로그를 적용하지 않는다.
+조회는 저장된 판정·금액·문구·알림·evaluatedAt·attemptCount를 유지한다.
+notify.expiresAt은 저장된 detectedAt + 30분이다. DB 장애는 공통 500이며 빈 결과로 바꾸지 않는다.
+
+### delivery 계약 및 백엔드 기본안
+
+요청 예: `{"deliveredAt":"2026-11-07T19:05:41+09:00","failure":null}` 또는
+`{"deliveredAt":null,"failure":"NO_PERMISSION"}`. 생략은 null과 같으며 정확히 하나만 값이 있어야 한다.
+둘 다 값이 있거나 둘 다 null, 잘못된 UUID·시각 형식은 400 INVALID_INPUT이다.
+
+명세 v0.10 4절은 failure를 `NO_PERMISSION 등`으로만 설명한다.
+이번 **백엔드 기본안**은 NO_PERMISSION / DISPLAY_FAILED / UNKNOWN 세 값만 허용한다.
+빈 문자열·임의 문자열은 400 INVALID_INPUT이다.
+deliveredAt은 Instant로 변환 후 마이크로초로 절삭하며 confirmedAt 이상,
+서버 현재 시각(마이크로초 절삭) + 기존 미래 허용 오차(기본 2분) 이하여야 한다. 위반 시 400 INVALID_INPUT이다.
+expiresAt 이후여도 서버 보고를 허용한다. 서버가 성공 시각을 생성하지 않는다.
+
+저장 notify.decision이 SEND가 아니면 409 DELIVERY_NOT_EXPECTED, 타인·없는 이벤트는 404 PARKING_EVENT_NOT_FOUND다.
+최초 실패를 보존하고 다른 실패는 무시한다(백엔드 기본안). 실패 후 성공은 성공 시각을 저장하고 failure를 지운다.
+최초 성공 후 모든 유효한 보고는 기존 성공을 유지한다. 동일 보고도 204이고 중복 보고에도 입력·시각 검증을 적용한다.
+이벤트 FOR UPDATE → 판정 FOR UPDATE 순서와 READ COMMITTED 트랜잭션으로 POST 재요청 및 동시 보고와 직렬화한다.
+평가 결과·금액·문구·알림 결정·attemptCount·evaluatedAt·updatedAt은 delivery로 변경하지 않는다.
+
+### stats.peak 백엔드 기본안
+
+peak의 위치·요일·누락 슬롯 0·최다 슬롯·동점 시 이른 슬롯·저장 모델 원천 사용은
+이번 작업 요청의 **백엔드 기본안**이다. 명세의 기존 확정 내용과 구분한다.
+확정 좌표의 EPSG:5186/50m 칸은 기존 PostgisGridResolver로 조회한다(폴리곤 경계 포함 여부로 대체하지 않음).
+detectedAt의 KST ISO 요일(월=1~일=7)과 저장 판정의 is_holiday, 참조 모델의 AS_SUNDAY/NONE 정책을 사용한다.
+과거 is_holiday가 없는 경우만 기존 엔진과 동일하게 holidays를 확인한다.
+
+저장 판정의 prediction_version_id/source_import_id와 참조 버전의 source_import_id가 일치해야 한다.
+report_aggregates는 import_id·grid_id·weekday와 period_start/period_end를 함께 제한한다.
+period_start/end와 training_start/observed_end는 모두 DATE다. 양쪽 날짜를 정확히 비교하며 반개방 타임스탬프 구간으로 변환하지 않는다.
+source_availability의 observed_end는 해당 날짜까지의 완전 관측 종료일이라는 기존 스키마 계약을 따른다.
+ETL 실행 코드는 이 브랜치에 없어 내부 날짜 필터 구현은 미검증이다. 기존 날짜 메타데이터를 재해석하거나 집계를 재생성하지 않는다.
+
+slotCounts는 해당 요일의 슬롯 0~7 신고 건수 8개이며 누락 슬롯은 0이다. timeSlot은 최댓값의 슬롯, 동점은 이른 슬롯이다.
+해당 요일 행 전체가 없거나 원천·기간·참조 버전·칸을 검증할 수 없으면 peak: null이다.
+다른 원천·기간을 합산하거나 현재 활성 버전으로 대체하지 않는다. 희소 저장과 기간 포함 PK로 이 조건을 기존 스키마에서 표현할 수 있다.
+
+### 실행 및 연결 지점
+
+일반 검증: Java 21에서 `./gradlew.bat test compilePostgresTestJava bootJar --no-daemon`.
+관련 DB 검증: `./scripts/db/Verify-ParkingEvents.ps1 -JavaHome <Java21경로>`.
+기존 실행기는 전용 tmpfs PostGIS 컨테이너와 parking_api 역할을 사용하며 개발 DB·기존 볼륨을 사용하지 않는다.
+실제 Swagger는 `/v3/api-docs`에서 확인한다. 공통 ApiResponse를 쓰며 nullable 필드도 생략하지 않는다.
+
+**권한 자동 적용:** V4의 parking_app 참조 테이블 목록에 빠져 있던 report_aggregates 조회 권한은
+`V6__parking_event_query_grants.sql`에서 `GRANT SELECT ON public.report_aggregates TO parking_app`으로 보완한다.
+2026-11-07 origin/dev를 fetch해 현재 브랜치와 모두 V5까지임을 확인하고 미사용 V6를 선택했다.
+기존 bootstrap은 parking_api를 parking_app에 소속시키고, 앱 실행 시 별도 parking_migrator 연결이 Flyway를 수행한다.
+따라서 기존 V5 DB도 정상 앱 기동의 Flyway 단계에서 V6가 자동 적용되고, 런타임 parking_api는 SELECT를 상속한다.
+새 DB에도 V1~V6가 순차 적용된다. 기존 V1~V5 및 DBML은 수정하지 않는다.
+역할 생성·추가 역할 소속·다른 테이블 권한·집계 쓰기 권한은 부여하지 않는다.
+수동 grants SQL은 제거했으며 별도 수동 적용 단계는 없다. 이미 수동 부여된 DB에서도 같은 GRANT는 안전하게 적용된다.
+Flyway가 실패하면 기동 오류를 해결해야 하며 baseline/repair나 권한 높은 런타임 계정으로 우회하지 않는다.
+이번 검증은 격리 DB에만 수행했다. 개발·운영 DB는 변경하지 않았다.
+
+### 합성 데이터 검증과 실제 덤프 검증
+
+합성 DB에서는 delivery 배타 입력, 세 실패 값, 시간 경계·마이크로초 절삭, 중복, 실패→성공,
+최초 성공 보존, 성공/실패·성공/성공 동시 보고와 판정 보존을 검증한다.
+peak는 정확한 원천·기간, 다른 기간/원천 배제, 집계 없음, 누락 슬롯, 동점, 공휴일 치환,
+활성 버전 부재 및 참조 정보 부재를 검증한다. 실제 인증 필터를 거친 상세 HTTP에서 non-null peak도 확인한다.
+
+실제 덤프는 원본을 변경하거나 Git에 추가하지 않고 새 tmpfs PostGIS 컨테이너에 복원했다.
+기존 bootstrap → Flyway → 참조 테이블 16개 staging → FK 순서 적재 → 기존 freeze/activate 절차를 재사용했다.
+원본의 동결·활성 메타데이터만 복원했으며 규칙 SQL을 적용·공개하지 않았다.
+기존 보호 트리거·권한·함수의 복원 전후 fingerprint는 동일했다(당시 검증에서는 SELECT 권한을 별도 적용했으며 현재 적용 경로는 V6로 통일했다).
+사용자·차량·주차 기록은 덤프에서 복원하지 않고 검증용 fixture만 만들었다가 제거했다.
+비공개 규칙을 새로 만들지 않기 위해 실제 참조 검증 fixture의 판정은 FAILED로 만들고 해당 모델/원천을 참조하게 했다.
+검증 후 prediction_versions와 report_aggregates는 staging 원본과 양방향 EXCEPT 비교로 전체 행이 동일함을 확인했다.
+
+- 원천: `131e348e-128c-4380-a111-50502bcc8e74`.
+- baseline-yongin-v1 / lgbm-yongin-v1 모두 training_start=2025-01-01, observed_end=2025-09-25.
+- 실제 report_aggregates에는 같은 원천의 2025-01-01~07-31(14,511행), 01-01~09-25(17,861행),
+  08-01~09-25(5,885행)이 있다. 정확히 일치하는 가운데 기간만 조회했다.
+- 두 시연 좌표의 grid_id는 215018 / 215452다. 두 모델 × 두 좌표 × 7요일, 총 28개 상세 HTTP 응답 모두 non-null이며 직접 SQL 집계와 일치했다.
+- 토요일 weekday=6의 결과:
+
+| 시연 좌표 | slotCounts (0~7) | timeSlot |
+| --- | --- | --- |
+| 1 | [7, 2, 2, 9, 9, 21, 49, 22] | 6 |
+| 2 | [5, 4, 5, 9, 20, 22, 69, 18] | 6 |
+
+28개 표본 중 16개에는 누락 슬롯의 0 채움이 있었다. 최댓값 동점 표본은 없어 합성 데이터에서 검증했다.
+이번 실제 표본에서 null은 없었다. 참조 검증 테스트는 null일 경우 NO_GRID_WEEKDAY_ROWS / SOURCE_MISMATCH / PERIOD_MISMATCH를 구분해 기록한다.
+상세 결과는 `build/peak-reference/http-results.json`, 복원 건수는 `build/peak-reference/source-counts.json`에 있다(ignored 산출물).
+
+실제 참조 검증 클래스는 ParkingPeakReferencePostgresTest다. 별도 격리 복원 DB의
+`verification.identity=dump-trial-20261106`, DB명 parking_dump_trial, loopback 임의 포트를 확인하고 실행한다.
+`PARKING_PEAK_REFERENCE_JDBC_URL=jdbc:postgresql://127.0.0.1:<격리포트>/parking_dump_trial`를 설정한 전용 환경에서
+`./gradlew.bat postgresTest --tests '*ParkingPeakReferencePostgresTest' --no-daemon`을 실행한다.
+공유 DB나 기존 Docker 볼륨을 이 환경 변수로 지정하지 않는다. 검증 종료 후 새 컨테이너만 중지한다.
+
+최종 검증(2026-11-07): 일반 테스트 104개, 격리 합성 PostgreSQL/PostGIS 테스트 42개 통과.
+실제 덤프 참조 테스트 1개(HTTP 비교 28건) 통과. postgresTest 컴파일·bootJar·git diff --check 통과.
+권한 적용 경로 변경 후에도 일반 테스트 104개와 격리 합성 테스트 42개를 재실행해 통과했다.
+격리 DB에서 실제 Flyway V5까지 적용 → parking_api SELECT 없음 → V6 1건 적용 → SELECT 상속 및
+INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER 권한 없음 → 재실행 0건을 확인했다.
+업그레이드 후 parking_api 연결의 상세 HTTP에서 non-null peak [0,0,7,0,7,0,0,0], weekday=6, timeSlot=2를 검증했다.
+권한 변경 후 보고서는 `build/parking-event-verification/parking-parking-event-12b486069c/`다.
+실제 덤프 테스트의 수동 GRANT도 Flyway 실행으로 교체하고 컴파일했다. 이 경로 변경에서는 덤프 복원을 반복하지 않았다.
+
+#18 ParkingStore/기존 응답 매핑을 재사용하고, 인증은 현재 브랜치의 JWT에 연결한다.
+미병합 #22/#24 코드는 병합하지 않는다. 기존 Flyway·DBML·ddl-auto 변경은 없으며 SELECT 권한 전용 V6만 추가했다.
+
+## 기존 POST 구현과 검증 이력
+
 `POST /api/v1/parking-events`의 인증·저장·판정·알림 응답과 커밋 후 비동기 주소 갱신을 구현했다.
 신규는 201, 기존 이벤트 처리(FAILED 재판정 포함)는 200이다. 기존 ApiResponse를 사용한다.
 공유 DB 직접 접속은 미확인이다. 전달된 덤프의 실제 LightGBM·시설 데이터는 별도 임시 DB에서 검증했다.
-조회·delivery·LLM·계정·ETL API는 추가하지 않는다.
+기존 POST 작업에는 조회·delivery·LLM·계정·ETL API를 포함하지 않았다. #25의 현재 상태는 위 절을 따른다.
 
 ## 확인한 기준
 

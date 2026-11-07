@@ -3,6 +3,8 @@ package io.github.yongyong14.parking_server.global.exception;
 import org.springframework.http.HttpStatus;
 
 public enum ErrorCode {
+    PARKING_EVENT_NOT_FOUND("PARKING_EVENT_NOT_FOUND", HttpStatus.NOT_FOUND, "주차 기록을 찾을 수 없습니다."),
+    DELIVERY_NOT_EXPECTED("DELIVERY_NOT_EXPECTED", HttpStatus.CONFLICT, "알림 표시 보고 대상이 아닙니다."),
     VEHICLE_NOT_FOUND("VEHICLE_NOT_FOUND", HttpStatus.NOT_FOUND, "활성 차량을 찾을 수 없습니다."),
     LOCATION_CONSENT_REQUIRED("LOCATION_CONSENT_REQUIRED", HttpStatus.FORBIDDEN, "위치기반서비스 동의가 필요합니다."),
     IDEMPOTENCY_KEY_REUSED("IDEMPOTENCY_KEY_REUSED", HttpStatus.CONFLICT, "같은 요청 키에 다른 내용이 전달되었습니다."),

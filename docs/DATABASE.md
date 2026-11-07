@@ -140,6 +140,10 @@ PostGIS가 public을 먼저 채우더라도 별도 이력 스키마를 사용하
 Hibernate와 schema.sql은 테이블을 생성하지 않는다.
 
 이미 적용된 V3/V4의 주석에는 옛 참고 파일명이 남아 있다. 체크섬 보존을 위해 주석도 수정하지 않는다.
+주차 이벤트 상세의 peak 조회에 필요한 `public.report_aggregates` SELECT는 V6에서 `parking_app`에 부여한다.
+`parking_api`는 bootstrap의 기존 그룹 소속으로 이 권한을 상속한다. V5에서 업그레이드할 때도 앱의
+별도 Flyway 연결(`parking_migrator`)이 자동 적용하므로 수동 권한 SQL을 실행할 필요가 없다.
+기존 V1~V5는 보존하며 런타임에 집계 쓰기나 다른 테이블 권한을 추가하지 않는다.
 `schema_v5.sql`은 V2, `migration_extra.sql`은 V3, `roles_and_grants.sql`은 V4와
 `scripts/db/bootstrap.sql`에 해당한다. 실제 실행에는 이 옛 파일명이 필요하지 않다.
 
