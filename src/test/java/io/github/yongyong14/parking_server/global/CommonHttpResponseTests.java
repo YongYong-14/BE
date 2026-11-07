@@ -26,6 +26,8 @@ import static org.hamcrest.Matchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+// MVC response contracts are isolated from authentication; SecurityHttpTests covers the real chain.
+@org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc(addFilters = false)
 @WebMvcTest(controllers = HealthController.class,
         properties = "spring.jackson.default-property-inclusion=non_null")
 @Import({CommonHttpResponseTests.ErrorTestController.class,
