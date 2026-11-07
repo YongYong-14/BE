@@ -13,8 +13,11 @@ import io.github.yongyong14.parking_server.global.security.AgreementPolicy;
 @Repository
 @Lazy
 public class ParkingStore {
-    final NamedParameterJdbcTemplate jdbc;
+    private final NamedParameterJdbcTemplate jdbc;
     public ParkingStore(DataSource source) { jdbc = new NamedParameterJdbcTemplate(source); }
+    // Repository advice can expose a CGLIB proxy whose instance fields are not the target's fields.
+    // Cross-bean access must dispatch through a method so it reaches the initialized target.
+    public NamedParameterJdbcTemplate jdbc() { return jdbc; }
     void lockUserAndConsent(UUID user, AgreementPolicy policy) {
         if (jdbc.queryForList("SELECT id FROM public.users WHERE id=:u FOR SHARE", Map.of("u", user)).isEmpty())
             throw new BusinessException(ErrorCode.UNAUTHORIZED);

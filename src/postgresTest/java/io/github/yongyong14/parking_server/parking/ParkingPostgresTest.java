@@ -260,7 +260,7 @@ class ParkingPostgresTest {
             assertThat(actual.get("x")).isEqualTo(Integer.valueOf(row.get(2)));
             assertThat(actual.get("y")).isEqualTo(Integer.valueOf(row.get(3)));
         }
-        assertThat(new PostgisGridResolver().resolve(store.jdbc,new BigDecimal("37.324450"),new BigDecimal("127.096184"),5186,50).id()).isEqualTo(101);
+        assertThat(new PostgisGridResolver().resolve(store.jdbc(),new BigDecimal("37.324450"),new BigDecimal("127.096184"),5186,50).id()).isEqualTo(101);
         var boundary=api.queryForMap("SELECT floor(-0.0001/50.0)::int negative,floor(50.0/50.0)::int boundary");
         assertThat(boundary.get("negative")).isEqualTo(-1); assertThat(boundary.get("boundary")).isEqualTo(1);
     }

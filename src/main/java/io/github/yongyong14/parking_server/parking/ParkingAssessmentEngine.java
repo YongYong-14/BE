@@ -25,7 +25,7 @@ public class ParkingAssessmentEngine {
     record Snapshot(String ruleSet, Map<String,Object> version, UUID statisticsImport, List<UUID> facilityImports) {}
     Snapshot snapshot() {
         // One statement / MVCC snapshot for all mutable active selectors.
-        var rows=store.jdbc.queryForList("""
+        var rows=store.jdbc().queryForList("""
                 SELECT rs.rule_set AS selected_rule,pv.*,
                   (SELECT id FROM public.data_imports WHERE source_dataset='yongin_enforcement' AND active) AS statistics_import,
                   ARRAY(SELECT id FROM public.data_imports WHERE active ORDER BY id) AS facility_imports
@@ -43,10 +43,10 @@ public class ParkingAssessmentEngine {
     }
     public void evaluate(UUID user, UUID event, ParkingRequest request, int attempt, Instant now) {
         Snapshot snapshot=snapshot();
-        var previous=store.jdbc.queryForList("SELECT id FROM public.risk_assessments WHERE parking_event_id=:event",Map.of("event",event));
+        var previous=store.jdbc().queryForList("SELECT id FROM public.risk_assessments WHERE parking_event_id=:event",Map.of("event",event));
         UUID assessment=previous.isEmpty() ? UUID.randomUUID() : (UUID)previous.getFirst().get("id");
         ZonedDateTime kst=request.detectedAt().atZoneSameInstant(ZoneId.of("Asia/Seoul"));
-        boolean holiday=Boolean.TRUE.equals(store.jdbc.queryForObject(
+        boolean holiday=Boolean.TRUE.equals(store.jdbc().queryForObject(
                 "SELECT EXISTS(SELECT 1 FROM public.holidays WHERE holiday_date=:day)",Map.of("day",kst.toLocalDate()),Boolean.class));
         int actual=kst.getDayOfWeek().getValue();
         Map<String,Object> v=snapshot.version;
@@ -66,12 +66,12 @@ public class ParkingAssessmentEngine {
         var p=store.requestParams(request).addValue("rule",snapshot.ruleSet)
                 .addValue("imports",snapshot.facilityImports);
         // Only actual MVP facilities. Published rules must express exactly the agreed legal thresholds.
-        var rules=store.jdbc.queryForList("""
+        var rules=store.jdbc().queryForList("""
                 SELECT zone_type,geometry_rule,legal_distance_m,fine_amount_car FROM public.zone_rules
                 WHERE rule_set=:rule AND zone_type IN ('HYDRANT','BUS_STOP','OTHER')
                 """,p);
         Number otherFine=ParkingRuleContract.otherFine(rules);
-        var hits=snapshot.facilityImports.isEmpty() ? new ArrayList<Map<String,Object>>() : store.jdbc.queryForList("""
+        var hits=snapshot.facilityImports.isEmpty() ? new ArrayList<Map<String,Object>>() : store.jdbc().queryForList("""
                 SELECT f.id AS facility_id,f.zone_type,r.legal_distance_m AS threshold_m,r.fine_amount_car,r.message_template_title,
                   ST_Distance(f.spatial_data,ST_SetSRID(ST_MakePoint(CAST(:lng AS float8),CAST(:lat AS float8)),4326)::geography) AS distance_m,
                   z.label
@@ -104,14 +104,14 @@ public class ParkingAssessmentEngine {
             values.addValue("error","UNSUPPORTED_PREDICTION_CONTRACT");
         } else {
             try {
-                var grid=grids.resolve(store.jdbc,request.confirmedLocation().lat(),request.confirmedLocation().lng(),
+                var grid=grids.resolve(store.jdbc(),request.confirmedLocation().lat(),request.confirmedLocation().lng(),
                         ((Number)v.get("projected_srid")).intValue(),((Number)v.get("cell_size_m")).intValue());
                 values.addValue("grid",grid.id());
                 if (grid.id()==null || !grid.inModelArea()) {
                     values.addValue("status","PARTIAL").addValue("prediction","OUT_OF_AREA");
                 } else {
                     var key=Map.of("version",v.get("id"),"grid",grid.id(),"weekday",weekday,"slot",kst.getHour()/3);
-                    boolean target=Boolean.TRUE.equals(store.jdbc.queryForObject("""
+                    boolean target=Boolean.TRUE.equals(store.jdbc().queryForObject("""
                             SELECT EXISTS(SELECT 1 FROM public.prediction_target_grids WHERE version_id=:version AND grid_id=:grid)
                             """,key,Boolean.class));
                     var prediction=predictions(key);
@@ -138,7 +138,7 @@ public class ParkingAssessmentEngine {
         }
         if (snapshot.statisticsImport!=null) {
             p.addValue("source",snapshot.statisticsImport).addValue("radius",settings.reportRadiusM());
-            var stats=store.jdbc.queryForMap("""
+            var stats=store.jdbc().queryForMap("""
                     SELECT COALESCE(SUM(report_count),0)::int AS reports,COALESCE(SUM(event_group_count),0)::int AS groups,
                       MIN(period_start) AS start,MAX(period_end) AS end FROM public.parcel_report_stats
                     WHERE import_id=:source AND ST_DWithin(location,ST_SetSRID(ST_MakePoint(CAST(:lng AS float8),CAST(:lat AS float8)),4326)::geography,:radius)
@@ -170,8 +170,8 @@ public class ParkingAssessmentEngine {
         values.addValue("notify",notifications.decide(status,level,top,request.detectedAt().toInstant(),now,caution,night))
                 .addValue("title",title).addValue("body",body);
         // Replacing a FAILED assessment and its reasons is atomic with attempt increment and logs.
-        store.jdbc.update("DELETE FROM public.assessment_reasons WHERE assessment_id=:id",Map.of("id",assessment));
-        store.jdbc.update("""
+        store.jdbc().update("DELETE FROM public.assessment_reasons WHERE assessment_id=:id",Map.of("id",assessment));
+        store.jdbc().update("""
                 INSERT INTO public.risk_assessments(id,parking_event_id,status,level,prediction_status,primary_zone_type,
                   attempt_count,reference_time,weekday_actual,weekday,time_slot,is_holiday,grid_id,zone_rule_set,
                   prediction_version_id,source_import_id,report_count,event_group_count,report_count_radius_m,
@@ -203,7 +203,7 @@ public class ParkingAssessmentEngine {
                     .addValue("threshold",reason.get("threshold_m"))
                     .addValue("accuracy",model || request.originalLocation()==null ? null : request.originalLocation().accuracyM().doubleValue())
                     .addValue("description",model ? reason.get("description") : reason.get("label")+" 법정 거리 이내 (확정 좌표 기준)");
-            store.jdbc.update("""
+            store.jdbc().update("""
                     INSERT INTO public.assessment_reasons(id,assessment_id,rank,reason_type,zone_type,facility_id,distance_m,threshold_m,accuracy_margin_m,description)
                     VALUES (:id,:a,:rank,:type,:zone,:facility,:distance,:threshold,:accuracy,:description)
                     """,rp);
@@ -217,7 +217,7 @@ public class ParkingAssessmentEngine {
 
     /** Separate read boundary also permits fault injection without altering protected frozen data. */
     protected List<Map<String,Object>> predictions(Map<String,Object> key) {
-        return store.jdbc.queryForList("""
+        return store.jdbc().queryForList("""
                 SELECT smoothed_count,top_percent FROM public.risk_predictions
                 WHERE version_id=:version AND grid_id=:grid AND weekday=:weekday AND time_slot=:slot
                 """,key);

@@ -20,17 +20,17 @@ public class ParkingQueryTransactions {
             FROM public.parking_events WHERE user_id=:u
             """;
     public Latest latest(UUID user) {
-        var periods=store.jdbc.queryForList("SELECT training_start,observed_end FROM public.prediction_versions WHERE active",Map.of());
+        var periods=store.jdbc().queryForList("SELECT training_start,observed_end FROM public.prediction_versions WHERE active",Map.of());
         if (periods.size()>1) throw new IllegalStateException("Multiple active versions");
         var period=periods.isEmpty() ? null : new Period(((java.sql.Date)periods.getFirst().get("training_start")).toLocalDate(),
                 ((java.sql.Date)periods.getFirst().get("observed_end")).toLocalDate());
-        var rows=store.jdbc.queryForList(EVENT+" ORDER BY detected_at DESC,id DESC LIMIT 1",Map.of("u",user));
+        var rows=store.jdbc().queryForList(EVENT+" ORDER BY detected_at DESC,id DESC LIMIT 1",Map.of("u",user));
         if (rows.isEmpty()) return new Latest(null,null,period);
         var e=rows.getFirst(); var a=store.assessment((UUID)e.get("id"));
         return new Latest(event(e),new Summary((String)a.get("status"),integer(a.get("level")),(String)a.get("prediction_status")),period);
     }
     Map<String,Object> owned(UUID user,UUID id) {
-        var rows=store.jdbc.queryForList(EVENT+" AND id=:id",Map.of("u",user,"id",id));
+        var rows=store.jdbc().queryForList(EVENT+" AND id=:id",Map.of("u",user,"id",id));
         if (rows.isEmpty()) throw new BusinessException(ErrorCode.PARKING_EVENT_NOT_FOUND);
         return rows.getFirst();
     }
@@ -42,20 +42,20 @@ public class ParkingQueryTransactions {
     private Peak peak(Map<String,Object> event,Map<String,Object> assessment) {
         Object version=assessment.get("prediction_version_id"), source=assessment.get("source_import_id");
         if (version==null || source==null) return null;
-        var versions=store.jdbc.queryForList("SELECT source_import_id,training_start,observed_end,holiday_policy,projected_srid,cell_size_m FROM public.prediction_versions WHERE id=:v",Map.of("v",version));
+        var versions=store.jdbc().queryForList("SELECT source_import_id,training_start,observed_end,holiday_policy,projected_srid,cell_size_m FROM public.prediction_versions WHERE id=:v",Map.of("v",version));
         if (versions.isEmpty()) return null;
         var v=versions.getFirst();
         if (!Objects.equals(source,v.get("source_import_id")) || v.get("training_start")==null || v.get("observed_end")==null
                 || !Set.of("AS_SUNDAY","NONE").contains(v.get("holiday_policy"))
                 || integer(v.get("projected_srid"))!=5186 || integer(v.get("cell_size_m"))!=50) return null;
-        var grid=new PostgisGridResolver().resolve(store.jdbc,java.math.BigDecimal.valueOf(decimal(event.get("lat"))),
+        var grid=new PostgisGridResolver().resolve(store.jdbc(),java.math.BigDecimal.valueOf(decimal(event.get("lat"))),
                 java.math.BigDecimal.valueOf(decimal(event.get("lng"))),5186,50);
         if (grid.id()==null) return null;
         var detected=time(event.get("detected_at"));
-        boolean holiday=assessment.get("is_holiday") instanceof Boolean value ? value : Boolean.TRUE.equals(store.jdbc.queryForObject(
+        boolean holiday=assessment.get("is_holiday") instanceof Boolean value ? value : Boolean.TRUE.equals(store.jdbc().queryForObject(
                 "SELECT EXISTS(SELECT 1 FROM public.holidays WHERE holiday_date=:day)",Map.of("day",detected.toLocalDate()),Boolean.class));
         int weekday=holiday && "AS_SUNDAY".equals(v.get("holiday_policy")) ? 7 : detected.getDayOfWeek().getValue();
-        var rows=store.jdbc.queryForList("""
+        var rows=store.jdbc().queryForList("""
                 SELECT time_slot,report_count FROM public.report_aggregates
                 WHERE import_id=:source AND grid_id=:grid AND weekday=:weekday
                   AND period_start=:start AND period_end=:end ORDER BY time_slot
@@ -68,7 +68,7 @@ public class ParkingQueryTransactions {
         return new Peak(weekday,slot,List.copyOf(counts));
     }
     public Items list(UUID user,String level,int limit) {
-        var rows=store.jdbc.queryForList("""
+        var rows=store.jdbc().queryForList("""
                 SELECT e.id,e.detected_at,e.address,a.status,a.level,a.prediction_status,a.primary_zone_type,
                   CASE WHEN a.level=1 THEN r.distance_m END AS distance_m,a.reference_fine_amount,
                   CASE WHEN a.level=2 THEN a.top_percent END AS top_percent

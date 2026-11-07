@@ -16,8 +16,43 @@ function Invoke-MapRiskZonesDocker {
     & docker @DockerArgs
     if ($LASTEXITCODE -ne 0) { throw 'MapRiskZones verification Docker command failed.' }
 }
+function Invoke-MapRiskGradle {
+    param([string]$Suite, [string]$LogName = 'gradle.log')
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = Join-Path $env:SystemRoot 'System32/cmd.exe'
+    $start.Arguments = "/d /c gradlew.bat postgresTest --tests $Suite --no-daemon"
+    $start.WorkingDirectory = $repo
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.EnvironmentVariables.Clear()
+    foreach ($key in @('SystemRoot','WINDIR','TEMP','TMP','USERPROFILE','HOMEDRIVE','HOMEPATH','PATH','APPDATA','LOCALAPPDATA')) {
+        $value=[Environment]::GetEnvironmentVariable($key,'Process')
+        if ($null -ne $value) { $start.EnvironmentVariables[$key]=$value }
+    }
+    $start.EnvironmentVariables['JAVA_HOME'] = (Resolve-Path -LiteralPath $JavaHome).Path
+    $start.EnvironmentVariables['AUTH_TEST_JDBC_URL'] = "jdbc:postgresql://127.0.0.1:$port/auth_verify"
+    $start.EnvironmentVariables['AUTH_TEST_PASSWORD'] = $password
+    $start.EnvironmentVariables['AUTH_TEST_IDENTITY'] = $identity
+    $child = [Diagnostics.Process]::new()
+    $child.StartInfo = $start
+    $started = $false
+    try {
+        if (!$child.Start()) { throw 'Cannot start map verification Gradle process.' }
+        $started = $true
+        $stdout = $child.StandardOutput.ReadToEndAsync()
+        $stderr = $child.StandardError.ReadToEndAsync()
+        $child.WaitForExit()
+        $log = ($stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()).Replace($password,'[REDACTED]')
+        [IO.File]::WriteAllText((Join-Path $report $LogName),$log,[Text.UTF8Encoding]::new($false))
+        if ($child.ExitCode -ne 0) { throw "MapRiskZones tests failed; see $report/$LogName" }
+    } finally {
+        if ($started -and !$child.HasExited) { $child.Kill() }
+        $child.Dispose()
+    }
+}
 $created = $false
-$process = $null
 try {
     Invoke-MapRiskZonesDocker @('run','-d','--name',$container,'--tmpfs','/var/lib/postgresql/data',
         '-e','POSTGRES_HOST_AUTH_METHOD=trust','-e','POSTGRES_DB=auth_verify',
@@ -42,12 +77,8 @@ try {
     if ($ReferenceDump) {
         $dumpPath=(Resolve-Path -LiteralPath $ReferenceDump).Path
         Invoke-MapRiskZonesDocker @('cp',$dumpPath,"${container}:/tmp/reference.dump")
-        Invoke-MapRiskZonesDocker @('cp',(Join-Path $repo 'src/main/resources/db/migration'),"${container}:/tmp/migrations")
-        Invoke-MapRiskZonesDocker @('exec',$container,'psql','-X','-U','parking_migrator','-d','auth_verify','-v','ON_ERROR_STOP=1','-1','-f','/tmp/migrations/V2__erd_v5_schema.sql') | Out-Null
-        foreach ($file in @('V3__erd_v5_guards_and_indexes.sql','V4__erd_v5_grants.sql','V5__parking_lots_hours_and_fee.sql')) {
-            Invoke-MapRiskZonesDocker @('exec',$container,'psql','-X','-U','parking_migrator','-d','auth_verify',
-                '-v','ON_ERROR_STOP=1','-1','-f',"/tmp/migrations/$file") | Out-Null
-        }
+        # Real Flyway history and latest grants, with identity checks before any migration.
+        Invoke-MapRiskGradle 'io.github.yongyong14.parking_server.map.MapRiskDumpPostgresTest.migrateFreshReferenceDatabase' 'migration.log'
         # Empty disposable DB only; all canonical guards remain installed and enabled.
         # Never import user/account/event/log tables, dump schema, ACLs, functions or Flyway history.
         foreach ($table in @('data_imports','zone_types','zone_rule_sets','zone_rules','spatial_grids',
@@ -97,33 +128,9 @@ DROP SCHEMA map_restore;
     Invoke-MapRiskZonesDocker @('exec',$container,'psql','-X','-U','postgres','-d','auth_verify',
         '-c','SELECT pg_reload_conf();') | Out-Null
 
-    $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = Join-Path $env:SystemRoot 'System32/cmd.exe'
-    $start.Arguments = '/d /c gradlew.bat postgresTest --tests io.github.yongyong14.parking_server.map.MapRiskPostgresTest --no-daemon'
-    if ($ReferenceDump) { $start.Arguments=$start.Arguments.Replace('MapRiskPostgresTest','MapRiskDumpPostgresTest') }
-    $start.WorkingDirectory = $repo
-    $start.UseShellExecute = $false
-    $start.CreateNoWindow = $true
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    $start.EnvironmentVariables.Clear()
-    foreach ($key in @('SystemRoot','WINDIR','TEMP','TMP','USERPROFILE','HOMEDRIVE','HOMEPATH','PATH','APPDATA','LOCALAPPDATA')) {
-        $value=[Environment]::GetEnvironmentVariable($key,'Process')
-        if ($null -ne $value) { $start.EnvironmentVariables[$key]=$value }
-    }
-    $start.EnvironmentVariables['JAVA_HOME'] = (Resolve-Path -LiteralPath $JavaHome).Path
-    $start.EnvironmentVariables['AUTH_TEST_JDBC_URL'] = "jdbc:postgresql://127.0.0.1:$port/auth_verify"
-    $start.EnvironmentVariables['AUTH_TEST_PASSWORD'] = $password
-    $start.EnvironmentVariables['AUTH_TEST_IDENTITY'] = $identity
-    $process = [Diagnostics.Process]::new()
-    $process.StartInfo = $start
-    if (!$process.Start()) { throw 'Cannot start auth test Gradle process.' }
-    $stdout = $process.StandardOutput.ReadToEndAsync()
-    $stderr = $process.StandardError.ReadToEndAsync()
-    $process.WaitForExit()
-    $log = ($stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()).Replace($password,'[REDACTED]')
-    [IO.File]::WriteAllText((Join-Path $report 'gradle.log'),$log,[Text.UTF8Encoding]::new($false))
-    if ($process.ExitCode -ne 0) { throw "MapRiskZones tests failed; see $report/gradle.log" }
+    $suite = 'io.github.yongyong14.parking_server.map.MapRiskPostgresTest'
+    if ($ReferenceDump) { $suite = 'io.github.yongyong14.parking_server.map.MapRiskDumpPostgresTest.referenceDumpMatchesServingCountsAndApplicationPrivileges' }
+    Invoke-MapRiskGradle $suite
     $results = Join-Path $repo 'build/test-results/postgresTest/TEST-io.github.yongyong14.parking_server.map.MapRiskPostgresTest.xml'
     if ($ReferenceDump) { $results=$results.Replace('MapRiskPostgresTest','MapRiskDumpPostgresTest') }
     [xml]$xml = [IO.File]::ReadAllText($results)
@@ -137,9 +144,5 @@ DROP SCHEMA map_restore;
     Write-Output 'PASS: PostGIS map bounds, facilities, frozen predictions, report lineage and application SELECT grants.'
     Write-Output "Reports: $report"
 } finally {
-    if ($process) {
-        if (!$process.HasExited) { $process.Kill() }
-        $process.Dispose()
-    }
     if ($created) { & docker stop $container | Out-Null }
 }
