@@ -13,6 +13,7 @@ import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+@io.github.yongyong14.parking_server.account.MockAccountRepositories
 @SpringBootTest
 @AutoConfigureMockMvc
 class VehicleHttpTests {

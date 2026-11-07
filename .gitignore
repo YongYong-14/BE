@@ -41,5 +41,9 @@ out/
 .env.*
 !.env.example
 
-# Local database archives (may contain private data)
+# Local database snapshots and extracted verification data; retain originals locally.
 *.dump
+*.backup
+*.sql.gz
+*.dump.gz
+*.dump.tar

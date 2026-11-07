@@ -1,5 +1,5 @@
 # Opt-in auth integration tests. Does not read .env or use Compose/development DBs.
-param([string]$JavaHome = $env:JAVA_HOME)
+param([string]$JavaHome = $env:JAVA_HOME, [switch]$Account)
 $ErrorActionPreference = 'Stop'
 if (!$JavaHome -or !(Test-Path -LiteralPath (Join-Path $JavaHome 'bin/java.exe'))) {
     throw 'Set JAVA_HOME to a Java 21 JDK or pass -JavaHome.'
@@ -35,6 +35,11 @@ try {
     $bootstrap = "CREATE ROLE auth_tester LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '$password'; " +
         "GRANT CONNECT,CREATE ON DATABASE auth_verify TO auth_tester; GRANT CREATE ON SCHEMA public TO auth_tester; " +
         "ALTER DATABASE auth_verify SET verification.identity TO '$identity';"
+    if ($Account) {
+        $bootstrap += " CREATE ROLE parking_app NOLOGIN; CREATE ROLE parking_etl NOLOGIN; CREATE ROLE parking_admin NOLOGIN;" +
+            " CREATE ROLE auth_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '$password' IN ROLE parking_app;" +
+            " GRANT CONNECT ON DATABASE auth_verify TO auth_app;"
+    }
     # Credentials go through stdin, never shell arguments or report output.
     $bootstrap | & docker exec -i $container psql -X -U postgres -d auth_verify -v ON_ERROR_STOP=1 -q
     if ($LASTEXITCODE -ne 0) { throw 'Cannot provision isolated auth role.' }
@@ -45,7 +50,9 @@ try {
 
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = Join-Path $env:SystemRoot 'System32/cmd.exe'
-    $start.Arguments = '/d /c gradlew.bat postgresTest --tests io.github.yongyong14.parking_server.security.UserExistencePostgresTest --no-daemon'
+    $suite = 'io.github.yongyong14.parking_server.security.UserExistencePostgresTest'
+    if ($Account) { $suite = 'io.github.yongyong14.parking_server.account.AccountPostgresTests' }
+    $start.Arguments = "/d /c gradlew.bat postgresTest --tests $suite --no-daemon"
     $start.WorkingDirectory = $repo
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
@@ -69,16 +76,16 @@ try {
     $log = ($stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()).Replace($password,'[REDACTED]')
     [IO.File]::WriteAllText((Join-Path $report 'gradle.log'),$log,[Text.UTF8Encoding]::new($false))
     if ($process.ExitCode -ne 0) { throw "Authentication tests failed; see $report/gradle.log" }
-    $results = Join-Path $repo 'build/test-results/postgresTest/TEST-io.github.yongyong14.parking_server.security.UserExistencePostgresTest.xml'
+    $results = Join-Path $repo "build/test-results/postgresTest/TEST-$suite.xml"
     [xml]$xml = [IO.File]::ReadAllText($results)
-    if ([int]$xml.testsuite.tests -ne 1 -or [int]$xml.testsuite.failures -ne 0 -or
+    if ([int]$xml.testsuite.tests -lt 1 -or [int]$xml.testsuite.failures -ne 0 -or
         [int]$xml.testsuite.errors -ne 0 -or [int]$xml.testsuite.skipped -ne 0) {
-        throw 'Expected one passing authentication integration test.'
+        throw 'Expected authentication integration tests without failures or skips.'
     }
     Copy-Item -LiteralPath $results -Destination (Join-Path $report 'tests.xml')
     Invoke-AuthenticationDocker @('exec',$container,'psql','-X','-U','postgres','-d','auth_verify',
         '-c',"SELECT version(); SELECT table_schema,table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;") > (Join-Path $report 'database.log')
-    Write-Output 'PASS: PostgreSQL users PK lookup, hard deletion and database failure propagation.'
+    Write-Output "PASS: $suite ($($xml.testsuite.tests) PostgreSQL tests)."
     Write-Output "Reports: $report"
 } finally {
     if ($process) {

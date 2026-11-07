@@ -1,5 +1,6 @@
 package io.github.yongyong14.parking_server.parking;
 
+import io.github.yongyong14.parking_server.account.MockAccountRepositories;
 import java.util.*;
 import org.junit.jupiter.api.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,6 +14,7 @@ import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+@MockAccountRepositories
 @SpringBootTest
 @AutoConfigureMockMvc
 class ParkingQueryHttpTests {
