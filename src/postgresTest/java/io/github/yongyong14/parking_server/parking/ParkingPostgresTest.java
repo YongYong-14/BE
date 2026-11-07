@@ -1,13 +1,11 @@
 package io.github.yongyong14.parking_server.parking;
 
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.*;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.*;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -30,11 +28,18 @@ class ParkingPostgresTest {
         if (!url.matches("jdbc:postgresql://127\\.0\\.0\\.1:\\d+/parking_event_verify")) throw new IllegalStateException("Expected isolated parking DB");
         owner=new JdbcTemplate(dataSource(url,"parking_migrator"));
         assertIdentity(owner,"parking_migrator");
-        for (String file:List.of("V1__verify_postgis.sql","V2__erd_v5_schema.sql","V3__erd_v5_guards_and_indexes.sql","V4__erd_v5_grants.sql","V5__parking_lots_hours_and_fee.sql")) {
-            String sql=new ClassPathResource("db/migration/"+file).getContentAsString(StandardCharsets.UTF_8);
-            var migrationTx=new TransactionTemplate(new DataSourceTransactionManager(owner.getDataSource()));
-            migrationTx.executeWithoutResult(s->owner.execute(sql));
-        }
+        // Exercise a real V5 -> latest Flyway upgrade, rather than applying a manual grant in test setup.
+        org.flywaydb.core.Flyway.configure().dataSource(owner.getDataSource()).locations("classpath:db/migration")
+                .defaultSchema("flyway").schemas("flyway").placeholderReplacement(false).cleanDisabled(true).target("5").load().migrate();
+        assertThat(owner.queryForObject("SELECT has_table_privilege('parking_api','public.report_aggregates','SELECT')",Boolean.class)).isFalse();
+        var upgrade=org.flywaydb.core.Flyway.configure().dataSource(owner.getDataSource()).locations("classpath:db/migration")
+                .defaultSchema("flyway").schemas("flyway").placeholderReplacement(false).cleanDisabled(true).load();
+        assertThat(upgrade.migrate().migrationsExecuted).isEqualTo(1);
+        assertThat(upgrade.info().current().getVersion().toString()).isEqualTo("6");
+        assertThat(owner.queryForObject("SELECT has_table_privilege('parking_api','public.report_aggregates','SELECT')",Boolean.class)).isTrue();
+        for (String privilege:List.of("INSERT","UPDATE","DELETE","TRUNCATE","REFERENCES","TRIGGER"))
+            assertThat(owner.queryForObject("SELECT has_table_privilege('parking_api','public.report_aggregates',?)",Boolean.class,privilege)).isFalse();
+        assertThat(upgrade.migrate().migrationsExecuted).isZero();
         source=dataSource(url,"parking_api");
         api=new JdbcTemplate(source);
         assertIdentity(api,"parking_api");
@@ -94,6 +99,160 @@ class ParkingPostgresTest {
     }
     ParkingRequest sample(UUID key) { return request(key,"37.324450","127.096184"); }
     ParkingTransactions.Result save(ParkingRequest r) { return tx.execute(s->service.save(user,r)); }
+    void delivery(UUID id,ParkingDeliveryRequest r) {
+        tx.executeWithoutResult(s->new ParkingDeliveryTransactions(store,clock,
+                new ParkingSettings("parking-test",List.of(),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50)).report(user,id,r));
+    }
+    @Test void deliveryPreservesFirstFailureThenFirstSuccessAndAssessment() {
+        var first=save(sample(UUID.randomUUID())); UUID id=first.parkingEventId();
+        delivery(id,new ParkingDeliveryRequest(null,"NO_PERMISSION"));
+        delivery(id,new ParkingDeliveryRequest(null,"DISPLAY_FAILED"));
+        assertThat(store.assessment(id).get("delivery_failure")).isEqualTo("NO_PERMISSION");
+        var success=OffsetDateTime.parse("2026-11-07T19:05:40.123456789+09:00");
+        delivery(id,new ParkingDeliveryRequest(success,null));
+        delivery(id,new ParkingDeliveryRequest(success.plusSeconds(1),null));
+        delivery(id,new ParkingDeliveryRequest(null,"UNKNOWN"));
+        var after=new HashMap<>(store.assessment(id));
+        assertThat(ParkingStore.instant(after.get("delivered_at"))).isEqualTo(success.toInstant().truncatedTo(java.time.temporal.ChronoUnit.MICROS));
+        assertThat(after.get("delivery_failure")).isNull();
+        after.put("delivered_at",null); after.put("delivery_failure",null);
+        assertThat(after).isEqualTo(first.assessment());
+        assertThat(new ParkingQueryTransactions(store).detail(user,id).assessment().notification()).isEqualTo(ParkingResponse.from(first).assessment().notification());
+        assertCode(()->delivery(id,new ParkingDeliveryRequest(null,"")),ErrorCode.INVALID_INPUT);
+    }
+    @Test void deliveryTimeBoundariesOwnershipAndDecision() {
+        var confirmed=sample(UUID.randomUUID()).confirmedAt();
+        UUID id=save(sample(UUID.randomUUID())).parkingEventId();
+        assertCode(()->delivery(id,new ParkingDeliveryRequest(confirmed.minusNanos(1),null)),ErrorCode.INVALID_INPUT);
+        assertCode(()->delivery(id,new ParkingDeliveryRequest(now.plusSeconds(120).plusNanos(1000).atOffset(ZoneOffset.UTC),null)),ErrorCode.INVALID_INPUT);
+        delivery(id,new ParkingDeliveryRequest(now.plusSeconds(120).plusNanos(999).atOffset(ZoneOffset.UTC),null));
+        UUID exact=save(sample(UUID.randomUUID())).parkingEventId();
+        delivery(exact,new ParkingDeliveryRequest(confirmed,null));
+        assertThat(ParkingStore.instant(store.assessment(exact).get("delivered_at"))).isEqualTo(confirmed.toInstant());
+        UUID stranger=UUID.randomUUID();
+        assertCode(()->tx.executeWithoutResult(s->new ParkingDeliveryTransactions(store,clock,new ParkingSettings("",List.of(),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50))
+                .report(stranger,id,new ParkingDeliveryRequest(null,"UNKNOWN"))),ErrorCode.PARKING_EVENT_NOT_FOUND);
+        assertCode(()->delivery(UUID.randomUUID(),new ParkingDeliveryRequest(null,"UNKNOWN")),ErrorCode.PARKING_EVENT_NOT_FOUND);
+        UUID notSend=save(request(UUID.randomUUID(),"37.324900","127.096749")).parkingEventId();
+        assertCode(()->delivery(notSend,new ParkingDeliveryRequest(null,"UNKNOWN")),ErrorCode.DELIVERY_NOT_EXPECTED);
+        // A late report remains valid even after the app's 30-minute display window.
+        var later=Clock.fixed(now.plusSeconds(3600),ZoneOffset.UTC);
+        UUID late=save(sample(UUID.randomUUID())).parkingEventId();
+        tx.executeWithoutResult(s->new ParkingDeliveryTransactions(store,later,new ParkingSettings("",List.of(),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50))
+                .report(user,late,new ParkingDeliveryRequest(now.plusSeconds(3500).atOffset(ZoneOffset.UTC),null)));
+        assertThat(store.assessment(late).get("delivered_at")).isNotNull();
+    }
+    @Test void concurrentDeliverySuccessDominatesFailureAndFirstSuccessWins() throws Exception {
+        for (boolean twoSuccesses:List.of(false,true)) {
+            UUID id=save(sample(UUID.randomUUID())).parkingEventId();
+            var a=new ParkingDeliveryRequest(now.atOffset(ZoneOffset.UTC),null);
+            var b=twoSuccesses ? new ParkingDeliveryRequest(now.plusSeconds(1).atOffset(ZoneOffset.UTC),null) : new ParkingDeliveryRequest(null,"UNKNOWN");
+            var gate=new CyclicBarrier(2);
+            try (var pool=Executors.newFixedThreadPool(2)) {
+                var one=pool.submit(()->{ gate.await(5,TimeUnit.SECONDS); delivery(id,a); return true; });
+                var two=pool.submit(()->{ gate.await(5,TimeUnit.SECONDS); delivery(id,b); return true; });
+                one.get(15,TimeUnit.SECONDS); two.get(15,TimeUnit.SECONDS);
+            }
+            var saved=store.assessment(id);
+            assertThat(saved.get("delivery_failure")).isNull();
+            var at=ParkingStore.instant(saved.get("delivered_at"));
+            if (twoSuccesses) assertThat(at).isIn(a.deliveredAt().toInstant(),b.deliveredAt().toInstant());
+            else assertThat(at).isEqualTo(a.deliveredAt().toInstant());
+            delivery(id,a); delivery(id,b);
+            assertThat(ParkingStore.instant(store.assessment(id).get("delivered_at"))).isEqualTo(at);
+        }
+    }
+    void aggregate(UUID source,int weekday,int slot,int count,String end) {
+        owner.update("INSERT INTO report_aggregates(import_id,grid_id,weekday,time_slot,period_start,period_end,day_count,report_count,event_group_count) VALUES (?,101,?,?,'2025-01-01',?::date,1,?,?)",
+                source,weekday,slot,end,count,count);
+    }
+    @Test void peakUsesSavedSourceExactPeriodMissingSlotsAndEarliestTie() {
+        UUID id=save(sample(UUID.randomUUID())).parkingEventId();
+        var queries=new ParkingQueryTransactions(store);
+        assertThat(queries.detail(user,id).assessment().stats().peak()).isNull();
+        aggregate(importId,6,3,9,"2025-09-25"); aggregate(importId,6,5,9,"2025-09-25");
+        aggregate(importId,6,0,999,"2025-09-24"); aggregate(importId,7,0,999,"2025-09-25");
+        var peak=queries.detail(user,id).assessment().stats().peak();
+        assertThat(peak.weekday()).isEqualTo(6); assertThat(peak.timeSlot()).isEqualTo(3);
+        assertThat(peak.slotCounts()).containsExactly(0L,0L,0L,9L,0L,9L,0L,0L);
+        owner.update("UPDATE prediction_versions SET active=false WHERE id=?",version);
+        assertThat(queries.detail(user,id).assessment().stats().peak()).isEqualTo(peak);
+        owner.update("DELETE FROM report_aggregates WHERE import_id=? AND period_end='2025-09-25'",importId);
+        assertThat(queries.detail(user,id).assessment().stats().peak()).isNull();
+        UUID another=UUID.randomUUID();
+        owner.update("INSERT INTO data_imports(id,source_dataset,file_name,file_hash) VALUES (?,'yongin_enforcement','other',?)",another,another.toString());
+        aggregate(another,6,0,999,"2025-09-25");
+        assertThat(queries.detail(user,id).assessment().stats().peak()).isNull();
+        // Assessment source mismatch is permitted as a FAILED snapshot, but must never borrow model statistics.
+        owner.update("UPDATE risk_assessments SET source_import_id=? WHERE parking_event_id=?",another,id);
+        assertThat(queries.detail(user,id).assessment().stats().peak()).isNull();
+        // Missing lineage is represented by a FAILED fixture, preserving the model-result invariant.
+        owner.update("UPDATE risk_assessments SET status='FAILED',level=NULL,prediction_status='MISSING_ROW',notify_decision='NONE',source_import_id=NULL,prediction_version_id=NULL WHERE parking_event_id=?",id);
+        assertThat(queries.detail(user,id).assessment().stats().peak()).isNull();
+    }
+    @Test void queryEmptyPeriodOwnershipOrderingAndSavedAssessment() {
+        var queries=new ParkingQueryTransactions(store);
+        var empty=tx.execute(s->queries.latest(user));
+        assertThat(empty.event()).isNull(); assertThat(empty.assessment()).isNull();
+        assertThat(empty.dataPeriod().start()).isEqualTo(LocalDate.parse("2025-01-01"));
+        assertThat(empty.dataPeriod().end()).isEqualTo(LocalDate.parse("2025-09-25"));
+        assertThat(tx.execute(s->queries.list(user,"ALL",50)).items()).isEmpty();
+        var first=save(sample(UUID.randomUUID()));
+        var second=save(sample(UUID.randomUUID()));
+        var expected=List.of(first.parkingEventId(),second.parkingEventId()).stream()
+                .sorted((a,b)->b.toString().compareTo(a.toString())).toList();
+        assertThat(tx.execute(s->queries.list(user,"ALL",50)).items()).extracting(i->i.event().id()).containsExactlyElementsOf(expected);
+        assertThat(tx.execute(s->queries.latest(user)).event().id()).isEqualTo(expected.getFirst());
+        assertThat(tx.execute(s->queries.list(user,"2",1)).items()).hasSize(1);
+        assertThat(tx.execute(s->queries.list(user,"1",50)).items()).isEmpty();
+        var detail=tx.execute(s->queries.detail(user,first.parkingEventId()));
+        var original=ParkingResponse.from(first).assessment();
+        assertThat(detail.assessment().notification()).isEqualTo(original.notification());
+        assertThat(detail.assessment().referenceFineAmount()).isEqualTo(original.referenceFineAmount());
+        assertThat(detail.assessment().evaluatedAt()).isEqualTo(original.evaluatedAt());
+        assertThat(detail.assessment().reasons()).isEqualTo(original.reasons());
+        assertThat(detail.event().vehicleName()).isEqualTo("snapshot-name");
+        assertThat(detail.event().confirmedLocation().lat()).isEqualTo(37.324450);
+        UUID stranger=UUID.randomUUID();
+        assertCode(()->tx.execute(s->queries.detail(stranger,first.parkingEventId())),ErrorCode.PARKING_EVENT_NOT_FOUND);
+        assertCode(()->tx.execute(s->queries.detail(user,UUID.randomUUID())),ErrorCode.PARKING_EVENT_NOT_FOUND);
+        assertThat(tx.execute(s->queries.list(stranger,"ALL",100)).items()).isEmpty();
+        owner.update("UPDATE prediction_versions SET active=false WHERE id=?",version);
+        assertThat(tx.execute(s->queries.latest(user)).dataPeriod()).isNull();
+        assertThat(store.assessment(first.parkingEventId())).isEqualTo(first.assessment());
+        assertThat(api.queryForObject("SELECT count(*) FROM location_access_logs WHERE user_id=?",Integer.class,user)).isEqualTo(2);
+    }
+    @Test void listKeepsPartialFailedAndLevelThreeWithoutConsent() {
+        var queries=new ParkingQueryTransactions(store);
+        save(request(UUID.randomUUID(),"37.324900","127.096749"));
+        owner.update("UPDATE data_imports SET active=false WHERE id=?",importId);
+        save(sample(UUID.randomUUID()));
+        owner.update("UPDATE prediction_versions SET active=false WHERE id=?",version);
+        save(sample(UUID.randomUUID()));
+        owner.update("INSERT INTO user_agreements(user_id,agreement_type,version,action) VALUES (?,'LOCATION_SERVICE','parking-test-version','WITHDRAW')",user);
+        var rows=tx.execute(s->queries.list(user,"ALL",100)).items();
+        assertThat(rows).extracting(i->i.assessment().status()).containsExactlyInAnyOrder("SUCCEEDED","FAILED","PARTIAL");
+        assertThat(tx.execute(s->queries.latest(user)).event()).isNotNull();
+        for (var row:rows) assertThat(tx.execute(s->queries.detail(user,row.event().id())).assessment().status()).isEqualTo(row.assessment().status());
+    }
+    @Test void listExecutesOneStatementRegardlessOfItemCount() {
+        for (int i=0;i<4;i++) save(sample(UUID.randomUUID()));
+        var statements=new java.util.concurrent.atomic.AtomicInteger();
+        var counted=new DelegatingDataSource(source) {
+            @Override public java.sql.Connection getConnection() throws java.sql.SQLException {
+                var connection=super.getConnection();
+                return (java.sql.Connection)java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
+                        new Class<?>[]{java.sql.Connection.class},(proxy,method,args)-> {
+                            if (method.getName().equals("prepareStatement")) statements.incrementAndGet();
+                            try { return method.invoke(connection,args); }
+                            catch (java.lang.reflect.InvocationTargetException e) { throw e.getCause(); }
+                        });
+            }
+        };
+        var queries=new ParkingQueryTransactions(new ParkingStore(counted));
+        assertThat(queries.list(user,"ALL",100).items()).hasSize(4);
+        assertThat(statements.get()).isEqualTo(1);
+    }
     @Test void suppliedGridSamplesMatchActualPostgisTransform() {
         for (var row:List.of(List.of("37.324450","127.096184","4170","10500"),List.of("37.324900","127.096749","4171","10501"))) {
             var actual=api.queryForMap("SELECT floor(ST_X(p)/50)::int x,floor(ST_Y(p)/50)::int y FROM (SELECT ST_Transform(ST_SetSRID(ST_MakePoint(?,?),4326),5186) p) t",
@@ -203,9 +362,13 @@ class ParkingPostgresTest {
     @Test void holidayPolicyAndKstTimeSlotAreAppliedWithoutReplacingActualWeekday() {
         owner.update("INSERT INTO holidays VALUES ('2026-11-07','isolated test holiday')");
         try {
-            var assessment=save(sample(UUID.randomUUID())).assessment();
+            var result=save(sample(UUID.randomUUID())); var assessment=result.assessment();
             assertThat(assessment).containsEntry("weekday_actual",6).containsEntry("weekday",7)
                     .containsEntry("time_slot",6).containsEntry("is_holiday",true);
+            aggregate(importId,7,1,4,"2025-09-25"); aggregate(importId,6,0,99,"2025-09-25");
+            var peak=new ParkingQueryTransactions(store).detail(user,result.parkingEventId()).assessment().stats().peak();
+            assertThat(peak.weekday()).isEqualTo(7); assertThat(peak.timeSlot()).isEqualTo(1);
+            assertThat(peak.slotCounts()).containsExactly(0L,4L,0L,0L,0L,0L,0L,0L);
         } finally { owner.update("DELETE FROM holidays WHERE holiday_date='2026-11-07'"); }
         var base=sample(UUID.randomUUID());
         var boundary=OffsetDateTime.parse("2026-11-08T03:00:00+09:00");
@@ -297,7 +460,7 @@ class ParkingPostgresTest {
         context.registerBean(GridResolver.class,PostgisGridResolver::new);
         context.registerBean(ReverseGeocoder.class,()->geocoder);
         context.registerBean("parkingGeocodingExecutor",java.util.concurrent.Executor.class,()->tasks::add);
-        context.register(ParkingStore.class,ParkingAssessmentEngine.class,ParkingTransactions.class,ParkingService.class,
+        context.register(ParkingStore.class,ParkingAssessmentEngine.class,ParkingTransactions.class,ParkingService.class,ParkingQueryTransactions.class,ParkingQueryService.class,ParkingDeliveryTransactions.class,
                 ParkingGeocodingTransactions.class,ParkingGeocodingListener.class);
         context.refresh();
         return context;
@@ -321,7 +484,7 @@ class ParkingPostgresTest {
             var filter=new io.github.yongyong14.parking_server.global.security.AccessTokenFilter(tokens,
                     new io.github.yongyong14.parking_server.global.security.JdbcUserExistence(org.springframework.jdbc.core.simple.JdbcClient.create(source)),
                     new io.github.yongyong14.parking_server.global.security.SecurityErrorWriter(mapper),request->false);
-            var mvc=org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(new ParkingController(context.getBean(ParkingService.class)))
+            var mvc=org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(new ParkingController(context.getBean(ParkingService.class),context.getBean(ParkingQueryService.class)))
                     .setControllerAdvice(new GlobalExceptionHandler())
                     .setCustomArgumentResolvers(new io.github.yongyong14.parking_server.global.security.CurrentUserResolver())
                     .addFilters(filter).build();
@@ -332,6 +495,18 @@ class ParkingPostgresTest {
                     .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isCreated())
                     .andReturn().getResponse().getContentAsString();
             assertThat(mapper.readTree(first).at("/data/assessment/notify/decision").asText()).isEqualTo("SEND");
+            UUID eventId=UUID.fromString(mapper.readTree(first).at("/data/parkingEventId").asText());
+            aggregate(importId,6,2,7,"2025-09-25"); aggregate(importId,6,4,7,"2025-09-25");
+            String detail=mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/v1/parking-events/"+eventId)
+                    .header("Authorization",bearer)).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk())
+                    .andReturn().getResponse().getContentAsString();
+            var peak=mapper.readTree(detail).at("/data/assessment/stats/peak");
+            assertThat(peak.path("weekday").asInt()).isEqualTo(6); assertThat(peak.path("timeSlot").asInt()).isEqualTo(2);
+            assertThat(peak.path("slotCounts").toString()).isEqualTo("[0,0,7,0,7,0,0,0]");
+            mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch("/api/v1/parking-events/"+eventId+"/delivery")
+                    .header("Authorization",bearer).contentType("application/json").content("{\"deliveredAt\":\"2026-11-07T19:05:41+09:00\",\"failure\":null}"))
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isNoContent())
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content().string(""));
             assertThat(tasks).hasSize(1); assertThat(fake.calls).isZero();
             owner.update("UPDATE notification_settings SET caution_enabled=false,night_enabled=false WHERE user_id=?",user);
             owner.update("UPDATE vehicles SET deleted_at=now() WHERE id=?",vehicle);

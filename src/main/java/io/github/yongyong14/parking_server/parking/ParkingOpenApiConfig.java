@@ -11,6 +11,17 @@ public class ParkingOpenApiConfig {
     @Bean OpenApiCustomizer parkingSchemas() {
         return api->{
             var components=api.getComponents();
+            var delivery=new ObjectSchema().addProperty("deliveredAt",nullable("string").format("date-time")
+                    .description("Instant 변환 후 마이크로초 절삭. confirmedAt 이상, 서버 현재 시각 + 미래 허용 오차(기본 2분) 이하. 만료 후 보고 허용."))
+                    .addProperty("failure",new Schema<>().types(Set.of("string","null"))._enum(Arrays.asList("NO_PERMISSION","DISPLAY_FAILED","UNKNOWN",null))
+                            .description("백엔드 기본안. 명세 v0.10은 NO_PERMISSION 등으로만 명시."));
+            delivery.setAdditionalProperties(false);
+            delivery.setDescription("둘 중 정확히 하나만 non-null. 생략은 null과 같음. 중복도 입력 검증. 최초 실패 유지, 성공 후 모든 유효한 보고는 최초 성공 유지. 실패 후 성공은 failure 제거.");
+            delivery.setOneOf(List.of(new ObjectSchema().addProperty("deliveredAt",new StringSchema().format("date-time"))
+                            .addProperty("failure",new Schema<>().types(Set.of("null"))).required(List.of("deliveredAt")),
+                    new ObjectSchema().addProperty("deliveredAt",new Schema<>().types(Set.of("null")))
+                            .addProperty("failure",enumeration("NO_PERMISSION","DISPLAY_FAILED","UNKNOWN")).required(List.of("failure"))));
+            components.addSchemas("ParkingDeliveryRequest",delivery);
             var point=new ObjectSchema().addProperty("lat",new NumberSchema().minimum(BigDecimal.valueOf(-90)).maximum(BigDecimal.valueOf(90)))
                     .addProperty("lng",new NumberSchema().minimum(BigDecimal.valueOf(-180)).maximum(BigDecimal.valueOf(180)));
             point.setRequired(List.of("lat","lng"));
@@ -64,6 +75,50 @@ public class ParkingOpenApiConfig {
             var success=new ObjectSchema().addProperty("success",new BooleanSchema()._const(true))
                     .addProperty("data",ref("ParkingResponse")).addProperty("error",new Schema<>().types(Set.of("null")));
             allRequired(success); components.addSchemas("ParkingSuccess",success);
+            var event=new ObjectSchema().addProperty("id",new StringSchema().format("uuid"))
+                    .addProperty("detectedAt",new StringSchema().format("date-time"))
+                    .addProperty("confirmedLocation",ref("ParkingPoint")).addProperty("address",nullable("string"))
+                    .addProperty("vehicleName",new StringSchema());
+            allRequired(event); components.addSchemas("ParkingQueryEvent",event);
+            var period=new ObjectSchema().addProperty("start",new StringSchema().format("date"))
+                    .addProperty("end",new StringSchema().format("date"));
+            allRequired(period); components.addSchemas("ParkingDataPeriod",period);
+            var summary=new ObjectSchema().addProperty("status",(Schema<?>)assessment.getProperties().get("status"))
+                    .addProperty("level",(Schema<?>)assessment.getProperties().get("level"))
+                    .addProperty("predictionStatus",(Schema<?>)assessment.getProperties().get("predictionStatus"));
+            allRequired(summary); components.addSchemas("ParkingSummary",summary);
+            var latest=new ObjectSchema().addProperty("event",optionalRef("ParkingQueryEvent"))
+                    .addProperty("assessment",optionalRef("ParkingSummary")).addProperty("dataPeriod",optionalRef("ParkingDataPeriod"));
+            allRequired(latest); components.addSchemas("ParkingLatest",latest);
+            var peak=new ObjectSchema().description("백엔드 기본안: 확정 좌표의 50m 칸, detectedAt의 KST 요일과 저장 판정의 공휴일 상태/참조 버전 정책. 저장 판정과 모델의 원천 일치 및 training_start~observed_end의 DATE 경계 정확 일치만 사용. 누락 슬롯 0, 최대 동점은 이른 슬롯. 검증 불가/집계 없음은 null; 활성 모델 대체 없음.").addProperty("weekday",new IntegerSchema().minimum(BigDecimal.ONE).maximum(BigDecimal.valueOf(7)))
+                    .addProperty("timeSlot",new IntegerSchema().minimum(BigDecimal.ZERO).maximum(BigDecimal.valueOf(7)))
+                    .addProperty("slotCounts",new ArraySchema().items(new IntegerSchema().format("int64").minimum(BigDecimal.ZERO)).minItems(8).maxItems(8));
+            allRequired(peak); components.addSchemas("ParkingPeak",peak);
+            var detailStats=new ObjectSchema(); detailStats.setProperties(new LinkedHashMap<>(stats.getProperties()));
+            detailStats.addProperty("peak",optionalRef("ParkingPeak")); allRequired(detailStats); components.addSchemas("ParkingDetailStats",detailStats);
+            var detailAssessment=new ObjectSchema(); detailAssessment.setProperties(new LinkedHashMap<>(assessment.getProperties()));
+            detailAssessment.addProperty("stats",ref("ParkingDetailStats")); allRequired(detailAssessment); components.addSchemas("ParkingDetailAssessment",detailAssessment);
+            var detail=new ObjectSchema().addProperty("event",ref("ParkingQueryEvent")).addProperty("assessment",ref("ParkingDetailAssessment"));
+            allRequired(detail); components.addSchemas("ParkingDetail",detail);
+            var listEvent=new ObjectSchema();
+            for (String field:List.of("id","detectedAt","address")) listEvent.addProperty(field,(Schema<?>)event.getProperties().get(field));
+            allRequired(listEvent); components.addSchemas("ParkingListEvent",listEvent);
+            var listAssessment=new ObjectSchema();
+            for (String field:List.of("status","level","predictionStatus","primaryZoneType","referenceFineAmount"))
+                listAssessment.addProperty(field,(Schema<?>)assessment.getProperties().get(field));
+            listAssessment.addProperty("distanceM",nullable("number")); listAssessment.addProperty("topPercent",nullable("number"));
+            allRequired(listAssessment); components.addSchemas("ParkingListAssessment",listAssessment);
+            var item=new ObjectSchema().addProperty("event",ref("ParkingListEvent")).addProperty("assessment",ref("ParkingListAssessment"));
+            allRequired(item); components.addSchemas("ParkingListItem",item);
+            var items=new ObjectSchema().addProperty("items",new ArraySchema().items(ref("ParkingListItem")));
+            allRequired(items); components.addSchemas("ParkingItems",items);
+            for (var entry:Map.of("/api/v1/parking-events/latest","ParkingLatest","/api/v1/parking-events/{id}","ParkingDetail","/api/v1/parking-events","ParkingItems").entrySet()) {
+                var envelope=new ObjectSchema().addProperty("success",new BooleanSchema()._const(true))
+                        .addProperty("data",ref(entry.getValue())).addProperty("error",new Schema<>().types(Set.of("null")));
+                allRequired(envelope); components.addSchemas(entry.getValue()+"Success",envelope);
+                api.getPaths().get(entry.getKey()).getGet().getResponses().get("200").setContent(new io.swagger.v3.oas.models.media.Content()
+                        .addMediaType("application/json",new MediaType().schema(ref(entry.getValue()+"Success"))));
+            }
         };
     }
     private static Schema<?> nullable(String type) { return new Schema<>().types(Set.of(type,"null")); }

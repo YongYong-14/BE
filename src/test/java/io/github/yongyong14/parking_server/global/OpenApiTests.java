@@ -34,7 +34,8 @@ class OpenApiTests {
         for (String path : new String[]{"/api/v1/health", "/api/v1/vehicle",
                 "/api/v1/auth/kakao", "/api/v1/auth/refresh", "/api/v1/auth/logout",
                 "/api/v1/me", "/api/v1/me/agreements", "/api/v1/notification-settings",
-                "/api/v1/webhooks/kakao/unlink", "/api/v1/map/risk-zones", "/api/v1/parking-events"}) {
+                "/api/v1/webhooks/kakao/unlink", "/api/v1/map/risk-zones", "/api/v1/parking-events",
+                "/api/v1/parking-events/latest", "/api/v1/parking-events/{id}"}) {
             assertThat(doc.path("paths").has(path)).as("Required API path %s", path).isTrue();
         }
         assertThat(doc.at("/paths/~1api~1v1~1auth~1kakao/post/security").isEmpty()).isTrue();
