@@ -23,7 +23,7 @@ public class ParkingDeliveryTransactions {
         request=request.validated();
         // Same lock order as POST replay: event first, then assessment. READ COMMITTED reads the winner after waiting.
         var key=Map.of("u",user,"id",id);
-        var events=store.jdbc.queryForList("SELECT confirmed_at FROM public.parking_events WHERE user_id=:u AND id=:id FOR UPDATE",key);
+        var events=store.jdbc().queryForList("SELECT confirmed_at FROM public.parking_events WHERE user_id=:u AND id=:id FOR UPDATE",key);
         if (events.isEmpty()) throw new BusinessException(ErrorCode.PARKING_EVENT_NOT_FOUND);
         if (request.deliveredAt()!=null) {
             var instant=request.deliveredAt().toInstant();
@@ -31,14 +31,14 @@ public class ParkingDeliveryTransactions {
                     || instant.isAfter(clock.instant().truncatedTo(ChronoUnit.MICROS).plus(settings.futureTolerance())))
                 throw new BusinessException(ErrorCode.INVALID_INPUT);
         }
-        var a=store.jdbc.queryForMap("SELECT id,notify_decision,delivered_at,delivery_failure FROM public.risk_assessments WHERE parking_event_id=:id FOR UPDATE",key);
+        var a=store.jdbc().queryForMap("SELECT id,notify_decision,delivered_at,delivery_failure FROM public.risk_assessments WHERE parking_event_id=:id FOR UPDATE",key);
         if (!"SEND".equals(a.get("notify_decision"))) throw new BusinessException(ErrorCode.DELIVERY_NOT_EXPECTED);
         if (a.get("delivered_at")!=null) return;
         if (request.deliveredAt()!=null) {
-            store.jdbc.update("UPDATE public.risk_assessments SET delivered_at=:at,delivery_failure=NULL WHERE id=:a",
+            store.jdbc().update("UPDATE public.risk_assessments SET delivered_at=:at,delivery_failure=NULL WHERE id=:a",
                     Map.of("a",a.get("id"),"at",Timestamp.from(request.deliveredAt().toInstant())));
         } else if (a.get("delivery_failure")==null) {
-            store.jdbc.update("UPDATE public.risk_assessments SET delivery_failure=:failure WHERE id=:a",
+            store.jdbc().update("UPDATE public.risk_assessments SET delivery_failure=:failure WHERE id=:a",
                     Map.of("a",a.get("id"),"failure",request.failure()));
         }
     }

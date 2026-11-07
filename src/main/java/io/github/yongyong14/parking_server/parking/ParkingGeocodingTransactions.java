@@ -22,12 +22,12 @@ public class ParkingGeocodingTransactions {
         // Same order as save/withdrawal. Keep locks across the bounded call so withdrawal cannot overtake disclosure.
         store.lockUserAndConsent(event.userId(),agreements);
         var p=Map.of("u",event.userId(),"id",event.eventId());
-        var rows=store.jdbc.queryForList("""
+        var rows=store.jdbc().queryForList("""
                 SELECT ST_Y(confirmed_location::geometry) AS lat,ST_X(confirmed_location::geometry) AS lng
                 FROM public.parking_events WHERE id=:id AND user_id=:u AND address IS NULL FOR UPDATE
                 """,p);
         if (rows.isEmpty()) return;
-        store.jdbc.update("""
+        store.jdbc().update("""
                 INSERT INTO public.location_access_logs(user_id,parking_event_id,action,purpose,recipient)
                 VALUES (:u,:id,'PROVIDE','주차 주소 변환 요청','Kakao Local')
                 """,p);
@@ -40,7 +40,7 @@ public class ParkingGeocodingTransactions {
             // Preserve the transfer-attempt log. The original parking transaction is already committed.
             return;
         }
-        address.filter(a->!a.isBlank()).ifPresent(a->store.jdbc.update(
+        address.filter(a->!a.isBlank()).ifPresent(a->store.jdbc().update(
                 "UPDATE public.parking_events SET address=:address WHERE id=:id AND user_id=:u AND address IS NULL",
                 new org.springframework.jdbc.core.namedparam.MapSqlParameterSource(p).addValue("address",a)));
     }

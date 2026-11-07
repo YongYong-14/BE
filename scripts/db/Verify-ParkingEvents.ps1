@@ -1,5 +1,5 @@
 # Opt-in parking-event integration tests. Does not read .env or use Compose/development DBs.
-param([string]$JavaHome = $env:JAVA_HOME)
+param([string]$JavaHome = $env:JAVA_HOME, [switch]$Integration)
 $ErrorActionPreference = 'Stop'
 if (!$JavaHome -or !(Test-Path -LiteralPath (Join-Path $JavaHome 'bin/java.exe'))) {
     throw 'Set JAVA_HOME to a Java 21 JDK or pass -JavaHome.'
@@ -45,7 +45,9 @@ try {
 
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = Join-Path $env:SystemRoot 'System32/cmd.exe'
-    $start.Arguments = '/d /c gradlew.bat postgresTest --tests io.github.yongyong14.parking_server.parking.ParkingPostgresTest --no-daemon'
+    $suite = 'io.github.yongyong14.parking_server.parking.ParkingPostgresTest'
+    if ($Integration) { $suite = 'io.github.yongyong14.parking_server.account.IntegratedJourneyPostgresTests' }
+    $start.Arguments = "/d /c gradlew.bat postgresTest --tests $suite --no-daemon"
     $start.WorkingDirectory = $repo
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
@@ -71,16 +73,18 @@ try {
     $log = ($stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()).Replace($password,'[REDACTED]')
     [IO.File]::WriteAllText((Join-Path $report 'gradle.log'),$log,[Text.UTF8Encoding]::new($false))
     if ($process.ExitCode -ne 0) { throw "ParkingEvent tests failed; see $report/gradle.log" }
-    $results = Join-Path $repo 'build/test-results/postgresTest/TEST-io.github.yongyong14.parking_server.parking.ParkingPostgresTest.xml'
+    $results = Join-Path $repo "build/test-results/postgresTest/TEST-$suite.xml"
     [xml]$xml = [IO.File]::ReadAllText($results)
-    if ([int]$xml.testsuite.tests -lt 32 -or [int]$xml.testsuite.failures -ne 0 -or
+    $minimumTests = 32
+    if ($Integration) { $minimumTests = 5 }
+    if ([int]$xml.testsuite.tests -lt $minimumTests -or [int]$xml.testsuite.failures -ne 0 -or
         [int]$xml.testsuite.errors -ne 0 -or [int]$xml.testsuite.skipped -ne 0) {
         throw 'Expected parking-event integration tests.'
     }
     Copy-Item -LiteralPath $results -Destination (Join-Path $report 'tests.xml')
     Invoke-ParkingEventDocker @('exec',$container,'psql','-X','-U','postgres','-d','parking_event_verify',
         '-c',"SELECT version(); SELECT table_schema,table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;") > (Join-Path $report 'database.log')
-    Write-Output 'PASS: PostgreSQL parking events, HTTP, immutable notifications, rollback, concurrency and post-commit address tasks.'
+    Write-Output "PASS: $suite ($($xml.testsuite.tests) PostgreSQL tests)."
     Write-Output "Reports: $report"
 } finally {
     if ($process) {

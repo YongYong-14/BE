@@ -8,6 +8,21 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import static org.junit.jupiter.api.Assertions.*;
 
 class MapRiskDumpPostgresTest {
+    @Test void migrateFreshReferenceDatabase() {
+        String url=required("AUTH_TEST_JDBC_URL"), password=required("AUTH_TEST_PASSWORD");
+        if(!url.matches("jdbc:postgresql://127\\.0\\.0\\.1:\\d+/auth_verify")) throw new IllegalStateException("Isolated DB required");
+        for(String role:java.util.List.of("parking_api","parking_migrator")) {
+            var db=JdbcClient.create(new DriverManagerDataSource(url,role,password));
+            assertEquals("auth_verify:"+role+":"+required("AUTH_TEST_IDENTITY"),db.sql(
+                    "SELECT current_database()||':'||current_user||':'||current_setting('verification.identity',true)").query(String.class).single());
+        }
+        var flyway=org.flywaydb.core.Flyway.configure().dataSource(url,"parking_migrator",password)
+                .defaultSchema("flyway").schemas("flyway").placeholderReplacement(false).cleanDisabled(true).load();
+        flyway.migrate();
+        assertEquals("6",flyway.info().current().getVersion().toString());
+        assertTrue(JdbcClient.create(new DriverManagerDataSource(url,"parking_api",password)).sql(
+                "SELECT has_table_privilege(current_user,'report_aggregates','SELECT')").query(Boolean.class).single());
+    }
     @Test void referenceDumpMatchesServingCountsAndApplicationPrivileges() throws Exception {
         String url=required("AUTH_TEST_JDBC_URL");
         if(!url.matches("jdbc:postgresql://127\\.0\\.0\\.1:\\d+/auth_verify")) throw new IllegalStateException("Isolated DB required");
@@ -71,10 +86,75 @@ class MapRiskDumpPostgresTest {
         assertEquals(compared,response.cells().size());
         assertEquals(new MapRiskResponse.DataPeriod(v.start(),v.end()),response.dataPeriod());
         assertEquals(response,service.get(bounds,at.withOffsetSameInstant(ZoneOffset.UTC)));
+        verifyParkingAndPeakOnReferenceData(url,password,rules,v,jdbc,api);
         explainMaximumViewport(api,repo,v,location,rules);
-        assertFalse(api.sql("SELECT has_table_privilege(current_user,'report_aggregates','SELECT')").query(Boolean.class).single());
+        assertTrue(api.sql("SELECT has_table_privilege(current_user,'report_aggregates','SELECT')").query(Boolean.class).single());
         System.out.println("DUMP_MAP_VERIFIED facilities="+facilities.size()+" comparedRiskCells="+compared
                 +" period="+v.start()+"~"+v.end());
+    }
+    private void verifyParkingAndPeakOnReferenceData(String url,String password,String rules,MapRiskRepository.Version v,
+            JdbcClient owner,JdbcClient api) {
+        boolean holiday=api.sql("SELECT EXISTS(SELECT 1 FROM holidays WHERE holiday_date=DATE '2026-11-07')").query(Boolean.class).single();
+        int weekday=holiday && "AS_SUNDAY".equals(v.policy())?7:6;
+        var position=api.sql("""
+            SELECT ST_Y(ST_Centroid(g.boundary)) lat,ST_X(ST_Centroid(g.boundary)) lng
+            FROM prediction_target_grids t JOIN spatial_grids g ON g.id=t.grid_id
+            WHERE t.version_id=:version AND NOT EXISTS (
+              SELECT 1 FROM facilities f JOIN data_imports i ON i.id=f.import_id AND i.active
+              JOIN zone_rules r ON r.zone_type=f.zone_type AND r.rule_set=:rules
+              WHERE f.zone_type IN ('HYDRANT','BUS_STOP')
+                AND ST_DWithin(f.spatial_data,ST_Centroid(g.boundary)::geography,r.legal_distance_m))
+            AND EXISTS (SELECT 1 FROM report_aggregates a WHERE a.grid_id=g.id AND a.import_id=:source
+              AND a.weekday=:weekday AND a.period_start=:start AND a.period_end=:end)
+            ORDER BY g.id LIMIT 1
+            """).param("version",v.id()).param("rules",rules)
+                .param("source",v.source()).param("weekday",weekday).param("start",v.start()).param("end",v.end())
+                .query((rs,n)->new MapRiskResponse.Location(rs.getDouble("lat"),rs.getDouble("lng"))).single();
+        var user=java.util.UUID.randomUUID(); var vehicle=java.util.UUID.randomUUID();
+        owner.sql("INSERT INTO users(id,kakao_id) VALUES (:id,:kakao)").param("id",user).param("kakao",Math.abs(new java.util.Random().nextLong())).update();
+        try {
+            owner.sql("INSERT INTO vehicles(id,user_id,name,bluetooth_address) VALUES (:v,:u,'reference','AA:BB:CC:DD:EE:FA')")
+                    .param("v",vehicle).param("u",user).update();
+            owner.sql("INSERT INTO notification_settings(user_id) VALUES (:u)").param("u",user).update();
+            owner.sql("INSERT INTO user_agreements(user_id,agreement_type,version,action) VALUES (:u,'LOCATION_SERVICE','reference-current','AGREE')").param("u",user).update();
+            var source=new DriverManagerDataSource(url,"parking_api",password);
+            var clock=Clock.fixed(Instant.parse("2026-11-07T10:05:41Z"),ZoneOffset.UTC);
+            var settings=new io.github.yongyong14.parking_server.parking.ParkingSettings(rules,java.util.List.of("HYDRANT","BUS_STOP"),Duration.ofMinutes(2),Duration.ofMinutes(10),10,50);
+            var store=new io.github.yongyong14.parking_server.parking.ParkingStore(source);
+            var transactions=new io.github.yongyong14.parking_server.parking.ParkingTransactions(store,
+                    new io.github.yongyong14.parking_server.parking.ParkingAssessmentEngine(store,settings,new io.github.yongyong14.parking_server.parking.PostgisGridResolver()),
+                    settings,new io.github.yongyong14.parking_server.global.security.AgreementPolicy("reference-current"),clock);
+            var parking=new io.github.yongyong14.parking_server.parking.ParkingService(transactions,settings);
+            var tx=new org.springframework.transaction.support.TransactionTemplate(new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
+            var detected=OffsetDateTime.parse("2026-11-07T19:05:12+09:00");
+            var input=new io.github.yongyong14.parking_server.parking.ParkingRequest(java.util.UUID.randomUUID(),vehicle,detected,detected.plusSeconds(28),
+                    io.github.yongyong14.parking_server.parking.ParkingRequest.Method.CONFIRMED,null,null,
+                    new io.github.yongyong14.parking_server.parking.ParkingRequest.Point(java.math.BigDecimal.valueOf(position.lat()),java.math.BigDecimal.valueOf(position.lng())),0);
+            var saved=tx.execute(s->parking.save(user,input).response());
+            assertNotNull(saved);
+            assertEquals("SUCCEEDED",saved.assessment().status());
+            var row=api.sql("SELECT prediction_version_id,source_import_id,grid_id,weekday,time_slot FROM risk_assessments WHERE parking_event_id=:id")
+                    .param("id",saved.parkingEventId()).query().singleRow();
+            assertEquals(v.id(),row.get("prediction_version_id")); assertEquals(v.source(),row.get("source_import_id"));
+            double raw=api.sql("SELECT top_percent FROM risk_predictions WHERE version_id=:v AND grid_id=:g AND weekday=:w AND time_slot=:s")
+                    .param("v",v.id()).param("g",row.get("grid_id")).param("w",row.get("weekday")).param("s",row.get("time_slot")).query(Double.class).single();
+            assertEquals(raw,saved.assessment().stats().topPercent());
+            assertEquals(raw<=v.threshold()?2:3,saved.assessment().level());
+            var detail=tx.execute(s->new io.github.yongyong14.parking_server.parking.ParkingQueryTransactions(store).detail(user,saved.parkingEventId()));
+            var counts=api.sql("SELECT time_slot,report_count FROM report_aggregates WHERE import_id=:source AND grid_id=:grid AND weekday=:weekday AND period_start=:start AND period_end=:end ORDER BY time_slot")
+                    .param("source",v.source()).param("grid",row.get("grid_id")).param("weekday",row.get("weekday"))
+                    .param("start",v.start()).param("end",v.end()).query().listOfRows();
+            if(counts.isEmpty()) assertNull(detail.assessment().stats().peak());
+            else {
+                var expected=new java.util.ArrayList<>(java.util.Collections.nCopies(8,0L));
+                for(var count:counts) expected.set(((Number)count.get("time_slot")).intValue(),((Number)count.get("report_count")).longValue());
+                assertEquals(expected,detail.assessment().stats().peak().slotCounts());
+            }
+            var mapped=new MapRiskService(new MapRiskRepository(api),clock,rules).get(new MapBounds(position.lat(),position.lng(),position.lat(),position.lng()),detected);
+            assertEquals(raw<=v.threshold(),!mapped.cells().isEmpty());
+            assertEquals(saved.assessment(),tx.execute(s->parking.save(user,input).response().assessment()));
+            System.out.println("REFERENCE_PARKING_PEAK_MAP_VERIFIED");
+        } finally { owner.sql("DELETE FROM users WHERE id=:id").param("id",user).update(); }
     }
     private void explainMaximumViewport(JdbcClient api,MapRiskRepository repo,MapRiskRepository.Version v,
             MapRiskResponse.Location center,String rules) throws Exception {
