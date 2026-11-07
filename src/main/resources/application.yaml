@@ -4,7 +4,7 @@ spring:
   datasource:
     hikari:
       data-source-properties:
-        # PostgreSQL error DETAIL may contain the entire failing row, including MAC addresses.
+        # PostgreSQL DETAIL can contain account data and vehicle MAC addresses.
         logServerErrorDetail: false
 
 springdoc:
@@ -35,8 +35,6 @@ server:
       pattern: '%h %l %u %t "%m %U %H" %s %b'
 
 app:
-  account:
-    location-versions: ${AUTH_LOCATION_VERSIONS:}
   kakao:
     local:
       rest-api-key: ${KAKAO_LOCAL_REST_API_KEY:}
@@ -45,6 +43,12 @@ app:
     secret-base64: ${JWT_SECRET_BASE64}
     access-ttl: ${JWT_ACCESS_TTL:30m}
     refresh-ttl: ${AUTH_REFRESH_TTL:30d}
+  account:
+    kakao-app-id: "${KAKAO_APP_ID:0}"
+    kakao-admin-key: "${KAKAO_PRIMARY_ADMIN_KEY:}"
+    terms-versions: "${AUTH_TERMS_VERSIONS:}"
+    privacy-versions: "${AUTH_PRIVACY_VERSIONS:}"
+    location-versions: "${AUTH_LOCATION_VERSIONS:}"
   security:
     swagger-public: false
     allowed-origins: ${CORS_ALLOWED_ORIGINS:}

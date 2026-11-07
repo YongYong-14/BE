@@ -1,5 +1,6 @@
 package io.github.yongyong14.parking_server.map;
 
+import io.github.yongyong14.parking_server.account.MockAccountRepositories;
 import ch.qos.logback.classic.*;
 import ch.qos.logback.classic.spi.*;
 import ch.qos.logback.core.read.ListAppender;
@@ -20,6 +21,7 @@ import org.springframework.test.context.DynamicPropertySource;
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+@MockAccountRepositories
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties={"logging.level.org.springframework=DEBUG",
         "logging.level.io.github.yongyong14.parking_server.map=DEBUG",

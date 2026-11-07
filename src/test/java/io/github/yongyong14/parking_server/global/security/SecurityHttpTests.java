@@ -1,5 +1,6 @@
 package io.github.yongyong14.parking_server.global.security;
 
+import io.github.yongyong14.parking_server.account.MockAccountRepositories;
 import io.github.yongyong14.parking_server.global.response.ApiResponse;
 import java.util.UUID;
 import org.junit.jupiter.api.*;
@@ -16,6 +17,7 @@ import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+@MockAccountRepositories
 @SpringBootTest
 @AutoConfigureMockMvc
 @Import(SecurityHttpTests.Probe.class)
@@ -55,11 +57,15 @@ class SecurityHttpTests {
     }
     @Test void publicRoutesIgnoreBadBearerButMethodsStayProtected() throws Exception {
         mvc.perform(get("/api/v1/health").header("Authorization", "Bearer broken")).andExpect(status().isOk());
-        for (String path : new String[]{"/api/v1/auth/kakao", "/api/v1/auth/refresh", "/api/v1/webhooks/kakao/unlink"}) {
-            // No account endpoints are implemented yet; public dispatch must reach MVC's 404.
-            mvc.perform(post(path).header("Authorization", "Bearer broken")).andExpect(status().isNotFound());
+        for (String path : new String[]{"/api/v1/auth/kakao", "/api/v1/auth/refresh"}) {
+            mvc.perform(post(path).header("Authorization", "Bearer broken")
+                    .contentType("application/json").content("{}")).andExpect(status().isBadRequest());
             mvc.perform(get(path)).andExpect(status().isUnauthorized());
         }
+        mvc.perform(post("/api/v1/webhooks/kakao/unlink").header("Authorization", "Bearer broken")
+                .contentType("application/x-www-form-urlencoded").content("app_id=1&user_id=2&referrer_type=ACCOUNT_DELETE"))
+                .andExpect(status().isServiceUnavailable());
+        mvc.perform(get("/api/v1/webhooks/kakao/unlink")).andExpect(status().isUnauthorized());
         mvc.perform(post("/api/v1/health")).andExpect(status().isUnauthorized());
         mvc.perform(get("/api/v1/unregistered")).andExpect(status().isUnauthorized());
         verifyNoInteractions(users);

@@ -14,6 +14,8 @@ public enum ErrorCode {
     VEHICLE_CONFLICT("VEHICLE_CONFLICT", HttpStatus.CONFLICT, "차량 정보가 변경되었습니다. 다시 조회한 뒤 재시도해 주세요."),
     INVALID_INPUT("INVALID_INPUT", HttpStatus.BAD_REQUEST, "입력값을 확인해 주세요."),
     UNAUTHORIZED("UNAUTHORIZED", HttpStatus.UNAUTHORIZED, "인증이 필요합니다."),
+    KAKAO_TOKEN_INVALID("KAKAO_TOKEN_INVALID", HttpStatus.UNAUTHORIZED, "카카오 인증 토큰을 확인해 주세요."),
+    TOKEN_REUSED("TOKEN_REUSED", HttpStatus.UNAUTHORIZED, "다시 로그인해 주세요."),
     TOKEN_EXPIRED("TOKEN_EXPIRED", HttpStatus.UNAUTHORIZED, "토큰이 만료되었습니다."),
     FORBIDDEN("FORBIDDEN", HttpStatus.FORBIDDEN, "접근 권한이 없습니다."),
     NOT_FOUND("NOT_FOUND", HttpStatus.NOT_FOUND, "요청한 리소스를 찾을 수 없습니다."),

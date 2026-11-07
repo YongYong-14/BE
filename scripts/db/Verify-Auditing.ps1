@@ -45,7 +45,7 @@ try {
 
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = Join-Path $env:SystemRoot 'System32/cmd.exe'
-    $start.Arguments = '/d /c gradlew.bat postgresTest --no-daemon'
+    $start.Arguments = '/d /c gradlew.bat postgresTest --tests io.github.yongyong14.parking_server.auditing.AuditingPostgresTest --no-daemon'
     $start.WorkingDirectory = $repo
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true

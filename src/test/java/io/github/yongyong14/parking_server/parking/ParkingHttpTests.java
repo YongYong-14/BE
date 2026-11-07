@@ -1,5 +1,6 @@
 package io.github.yongyong14.parking_server.parking;
 
+import io.github.yongyong14.parking_server.account.MockAccountRepositories;
 import java.sql.Timestamp;
 import java.time.*;
 import java.util.*;
@@ -16,6 +17,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 import static org.assertj.core.api.Assertions.*;
 
+@MockAccountRepositories
 @SpringBootTest
 @AutoConfigureMockMvc
 class ParkingHttpTests {

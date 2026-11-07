@@ -1,5 +1,6 @@
 package io.github.yongyong14.parking_server.global;
 
+import io.github.yongyong14.parking_server.account.MockAccountRepositories;
 import io.github.yongyong14.parking_server.global.exception.ErrorCode;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -14,6 +15,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+@MockAccountRepositories
 @SpringBootTest
 @AutoConfigureMockMvc
 @Import(CommonHttpResponseTests.ErrorTestController.class)
@@ -29,7 +31,15 @@ class OpenApiTests {
         assertThat(doc.at("/info/title").asText()).isEqualTo("용인 주차 안내 서비스 API");
         assertThat(doc.at("/info/version").asText()).isEqualTo("v1");
         assertThat(doc.has("success")).isFalse();
-        assertThat(doc.path("paths").has("/api/v1/health")).isTrue();
+        for (String path : new String[]{"/api/v1/health", "/api/v1/vehicle",
+                "/api/v1/auth/kakao", "/api/v1/auth/refresh", "/api/v1/auth/logout",
+                "/api/v1/me", "/api/v1/me/agreements", "/api/v1/notification-settings",
+                "/api/v1/webhooks/kakao/unlink", "/api/v1/map/risk-zones", "/api/v1/parking-events"}) {
+            assertThat(doc.path("paths").has(path)).as("Required API path %s", path).isTrue();
+        }
+        assertThat(doc.at("/paths/~1api~1v1~1auth~1kakao/post/security").isEmpty()).isTrue();
+        assertThat(doc.at("/paths/~1api~1v1~1me/get/security/0/bearerAuth").isArray()).isTrue();
+        assertThat(doc.at("/paths/~1api~1v1~1me/delete/responses/204").isObject()).isTrue();
         JsonNode operation = doc.path("paths").path("/api/v1/health").path("get");
         assertThat(operation.path("tags").get(0).asText()).isEqualTo("Health");
         JsonNode responses = operation.path("responses");
