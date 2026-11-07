@@ -22,7 +22,7 @@
 가로변은 경도 방향 4구간으로 나눠 합산한다. 각 구간은 90도 이하다.
 같은 좌표로 퇴화한 범위도 허용한다. 잘못된 쿼리와 범위는 400 INVALID_INPUT이다.
 두 축이 모두 같으면 Point, 한 축만 같으면 LineString, 나머지는 Polygon으로 만든다.
-시설과 격자는 동일한 범위 식을 사용하며 각 도형의 경계를 포함한다.
+시설과 격자는 동일한 원래 요청 범위 식을 사용하며 각 도형의 경계를 포함한다. 2km 제한은 시설 반경으로 확장하지 않은 원래 요청 화면에 적용한다.
 
 ## 응답
 
@@ -69,10 +69,12 @@ HYDRANT=5m·BUS_STOP=10m DISTANCE, OTHER=COVERS·거리 null·유한 비음수 �
 실제 공간 조회는 HYDRANT/BUS_STOP과 활성 data_imports만 사용하고 legal_distance_m을 반환한다.
 OTHER나 어린이보호구역은 공간 조회에 포함하지 않는다.
 
-명세는 화면 경계와 위험 반경이 겹치는 경우를 따로 정의하지 않았다.
-현재 기준은 **시설 점이 화면 범위 내부 또는 경계에 있으면 포함**이다(ST_Covers).
-시설 점이 밖이고 반경만 화면과 겹치면 제외한다. 소화전·정류소 자료는 Point여야 한다.
-인덱스 후보는 원본 geography 컬럼의 `&&`를 사용한다.
+**시설 중심이 화면 밖이어도 공개 규칙의 반경이 화면에 닿거나 겹치면 facilityZones에 포함**한다.
+소화전·정류소 모두 선택한 공개 규칙 행의 `legal_distance_m`을 거리 조건과 응답 `radiusM`에 사용한다.
+소화전·정류소 자료는 Point이며 화면은 Point/LineString/Polygon을 모두 지원한다.
+`ST_DWithin(f.spatial_data, 화면::geography, r.legal_distance_m)`으로 WGS84 타원체 미터 거리를 검사한다.
+ST_DWithin의 인덱스 지원 함수가 반경을 반영한 bounding box 사전 필터를 생성하여 원본 geography 컬럼의 GiST 인덱스를 사용한다.
+cells의 화면 범위·reportCount·판정 기준에는 시설 반경을 적용하지 않는다.
 
 격자는 boundary의 GiST 인덱스로 후보를 좁히고 ST_Intersects로 경계 접촉까지 포함한다.
 prediction_target_grids의 해당 버전 대상 중 in_model_area=true이고 버전의 SRID·크기와

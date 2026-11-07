@@ -13,7 +13,7 @@ public class MapRiskController {
     private final MapRiskService service;
     public MapRiskController(@Lazy MapRiskService service) { this.service=service; }
     @GetMapping
-    @Operation(summary="지도 위험 구역 조회", description="WGS84 화면 범위. 각 변 2km 이하. at은 시간대가 있는 ISO 8601이며 생략 시 서버 Clock 사용. 위치 동의와 이용 로그 없음. 예측 없는 칸은 안전을 의미하지 않습니다.")
+    @Operation(summary="지도 위험 구역 조회", description="WGS84 화면 범위(Point/LineString/Polygon). 원래 요청 화면의 각 변 2km 이하. facilityZones는 시설 중심이 화면 밖이어도 선택한 공개 규칙의 legal_distance_m 반경이 화면에 닿거나 겹치면 포함하며 radiusM으로 반환합니다. at은 시간대가 있는 ISO 8601이며 생략 시 서버 Clock 사용. 위치 동의와 이용 로그 없음. 예측 없는 칸은 안전을 의미하지 않습니다.")
     @ApiResponses({
         @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode="200",description="시설·주의 격자, 실제 조회 slot, 학습 시작~관측 종료 dataPeriod(start/end). 활성 버전 없으면 cells=[], dataPeriod=null",
             content=@io.swagger.v3.oas.annotations.media.Content(mediaType="application/json",schema=@io.swagger.v3.oas.annotations.media.Schema(ref="#/components/schemas/MapRiskSuccess"),

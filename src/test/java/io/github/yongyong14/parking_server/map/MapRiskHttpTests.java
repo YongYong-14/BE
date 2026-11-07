@@ -64,6 +64,7 @@ class MapRiskHttpTests {
                 .andExpect(jsonPath("$.data.dataPeriod.end").value("2025-09-25"))
                 .andExpect(jsonPath("$.data.cells[0].reportCount").value(12)).andExpect(jsonPath("$.data.facilityZones[0].radiusM").value(5));
         mvc.perform(get("/v3/api-docs")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.paths['/api/v1/map/risk-zones'].get.description").value(org.hamcrest.Matchers.containsString("legal_distance_m")))
                 .andExpect(jsonPath("$.paths['/api/v1/map/risk-zones'].get.responses['503']").exists())
                 .andExpect(jsonPath("$.components.schemas.Slot.properties.weekday").exists())
                 .andExpect(jsonPath("$.components.schemas.Slot.properties.timeSlot").exists())
@@ -72,5 +73,26 @@ class MapRiskHttpTests {
                 .andExpect(jsonPath("$.components.schemas.MapRiskResponse.properties.dataPeriod.oneOf[1].type").value("null"))
                 .andExpect(jsonPath("$.components.schemas.MapRiskSuccess.required").value(org.hamcrest.Matchers.containsInAnyOrder("success","data","error")))
                 .andExpect(jsonPath("$.paths['/api/v1/map/risk-zones'].get.responses['200'].content['application/json'].schema.$ref").value("#/components/schemas/MapRiskSuccess"));
+    }
+    @Test void outsideFacilityCentersAreReturnedForPointLineAndPolygonViewports() throws Exception {
+        for(var bounds:List.of(new MapBounds(37.32,127.09,37.32,127.09),
+                new MapBounds(37.32,127.09,37.32,127.091),
+                new MapBounds(37.32,127.09,37.321,127.09),
+                new MapBounds(37.32,127.09,37.321,127.091))) {
+            when(service.get(eq(bounds),isNull())).thenReturn(new MapRiskResponse(List.of(
+                    new MapRiskResponse.FacilityZone("HYDRANT",new MapRiskResponse.Location(37.32,127.08999),5),
+                    new MapRiskResponse.FacilityZone("BUS_STOP",new MapRiskResponse.Location(37.32,127.08998),10)),
+                    List.of(),new MapRiskResponse.Slot(6,6),null));
+            mvc.perform(get("/api/v1/map/risk-zones").header("Authorization",bearer)
+                    .param("minLat",Double.toString(bounds.minLat())).param("maxLat",Double.toString(bounds.maxLat()))
+                    .param("minLng",Double.toString(bounds.minLng())).param("maxLng",Double.toString(bounds.maxLng())))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.data.facilityZones.length()").value(2))
+                    .andExpect(jsonPath("$.data.facilityZones[0].location.lng").value(127.08999))
+                    .andExpect(jsonPath("$.data.facilityZones[0].radiusM").value(5))
+                    .andExpect(jsonPath("$.data.facilityZones[1].location.lng").value(127.08998))
+                    .andExpect(jsonPath("$.data.facilityZones[1].radiusM").value(10))
+                    .andExpect(jsonPath("$.data.cells").isEmpty());
+            verify(service).get(bounds,null);
+        }
     }
 }

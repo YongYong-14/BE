@@ -18,14 +18,15 @@ public class MapRiskRepository {
           THEN ST_SetSRID(ST_MakeLine(ST_MakePoint(:minLng,:minLat),ST_MakePoint(:maxLng,:maxLat)),4326)
         ELSE ST_MakeEnvelope(:minLng,:minLat,:maxLng,:maxLat,4326) END
         """;
+    // ST_DWithin supplies a radius-expanded GiST prefilter on the unmodified geography column.
+    // A center-only && filter would incorrectly discard facilities just outside the viewport.
     static final String FACILITIES_SQL = "WITH viewport AS (SELECT " + VIEWPORT + " AS area) " + """
             SELECT f.zone_type,ST_Y(f.spatial_data::geometry) lat,ST_X(f.spatial_data::geometry) lng,
                    r.legal_distance_m
             FROM viewport v CROSS JOIN public.facilities f JOIN public.data_imports i ON i.id=f.import_id AND i.active
             JOIN public.zone_rules r ON r.zone_type=f.zone_type AND r.rule_set=:rules
             WHERE f.zone_type IN ('HYDRANT','BUS_STOP')
-              AND f.spatial_data && v.area::geography
-              AND ST_Covers(v.area,f.spatial_data::geometry)
+              AND ST_DWithin(f.spatial_data,v.area::geography,r.legal_distance_m)
             ORDER BY f.zone_type,f.id
             """;
     static final String PREDICTIONS_SQL = "WITH viewport AS (SELECT " + VIEWPORT + " AS area) " + """
