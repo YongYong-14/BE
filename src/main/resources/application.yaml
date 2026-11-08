@@ -25,6 +25,8 @@ logging:
     org.springframework.web.servlet.mvc.support.DefaultHandlerExceptionResolver: INFO
     org.springframework.web.method.support.InvocableHandlerMethod: INFO
     org.springframework.web.method.HandlerMethod: INFO
+    # JDBC bind TRACE output would include nearby request coordinates.
+    org.springframework.jdbc.core.StatementCreatorUtils: INFO
     org.springframework.web.servlet.mvc.method.annotation.RequestResponseBodyMethodProcessor: INFO
 
 # No access log by default. If enabled, %U is the path only; never add %q or %r.
