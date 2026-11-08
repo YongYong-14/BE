@@ -99,10 +99,14 @@ public class ParkingStore {
         return jdbc.queryForMap("SELECT caution_enabled,night_enabled FROM public.notification_settings WHERE user_id=:u",Map.of("u",user));
     }
     void logUse(UUID user, UUID event) {
+        logUse(user,event,"주차 위험 판정","단말 확정 좌표");
+    }
+    void logUse(UUID user, UUID event, String purpose, String method) {
         jdbc.update("""
                 INSERT INTO public.location_access_logs(user_id,parking_event_id,action,purpose,collection_method)
-                VALUES (:u,:e,'USE','주차 위험 판정','단말 확정 좌표')
-                """,Map.of("u",user,"e",event));
+                VALUES (:u,:e,'USE',:purpose,:method)
+                """,new MapSqlParameterSource("u",user).addValue("e",event)
+                    .addValue("purpose",purpose).addValue("method",method));
     }
     static Instant instant(Object timestamp) { return ((Timestamp)timestamp).toInstant(); }
 }
