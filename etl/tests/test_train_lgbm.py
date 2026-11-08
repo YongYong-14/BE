@@ -46,3 +46,15 @@ def test_score_counts_reports_outside_targets_as_missed():
     m = score(pred, "rate", y, pd.Series([1.0] * 20), total=10)   # 대상 칸 밖에서 5건 더 나옴
     assert m["capture_top5"] == 0.5
     assert m["reports_in_targets_share"] == 0.5
+
+
+def test_load_refuses_when_source_data_changed():
+    import pytest
+    from train_lgbm import check_same_data
+    now = {"source_import_id": "a", "citizen_reports": 10, "citizen_reports_md5": "x",
+           "parcel_stats": 3, "parcel_stats_md5": "y"}
+    check_same_data(dict(now), now)                                   # 같으면 통과
+    with pytest.raises(SystemExit):
+        check_same_data({**now, "citizen_reports": 11}, now)          # 재적재 등으로 바뀌면 거부
+    with pytest.raises(SystemExit):
+        check_same_data(None, now)                                    # 지문 없는 옛 파일도 거부

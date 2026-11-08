@@ -104,6 +104,35 @@ def load(cur):
     return imp, ev, holidays, targets, targets_eval, latest_baseline_id(cur)
 
 
+def data_fingerprint(cur, imp) -> dict:
+    """학습에 쓴 원본 데이터의 지문. 학습(파일 저장) 시점과 DB 적재(--load) 시점에 각각 계산해 비교한다.
+    - 시민 신고: load()와 같은 조건의 (id, 칸) 목록
+    - 지번 통계: 대상 칸을 뽑는 parcel_report_stats(전체 기간)의 (지번, 건수) 목록
+    둘 중 하나라도 바뀌면(재적재, AMBIGUOUS 처리 변경 등) 예측 파일이 지금 DB와 맞지 않는다."""
+    cur.execute("""SELECT count(*), md5(coalesce(string_agg(e.id::text || ':' || e.grid_id::text, ',' ORDER BY e.id), ''))
+                     FROM enforcement_records e
+                    WHERE e.import_id = %s AND e.is_citizen_report AND e.grid_id IS NOT NULL
+                      AND e.location_precision IN ('PARCEL', 'ROAD')
+                      AND (e.enforced_at AT TIME ZONE 'Asia/Seoul')::date BETWEEN %s AND %s""",
+                (imp, OBS_START, OBS_END))
+    n_rep, h_rep = cur.fetchone()
+    cur.execute("""SELECT count(*), md5(coalesce(string_agg(parcel_id::text || ':' || report_count::text, ',' ORDER BY parcel_id), ''))
+                     FROM parcel_report_stats WHERE import_id = %s AND period_start = %s AND period_end = %s""",
+                (imp, OBS_START, OBS_END))
+    n_par, h_par = cur.fetchone()
+    return {"source_import_id": str(imp), "citizen_reports": n_rep, "citizen_reports_md5": h_rep,
+            "parcel_stats": n_par, "parcel_stats_md5": h_par}
+
+
+def check_same_data(saved: dict | None, now: dict) -> None:
+    if not saved:
+        raise SystemExit("예측 파일에 원본 데이터 지문이 없어요(예전 버전 파일). 학습부터 다시 실행하세요.")
+    diff = [k for k in now if saved.get(k) != now[k]]
+    if diff:
+        raise SystemExit("학습 이후 DB의 원본 데이터가 바뀌어서 이 예측 파일을 올릴 수 없어요 "
+                         f"(다른 항목: {', '.join(diff)}). 학습부터 다시 실행하세요.")
+
+
 def latest_baseline_id(cur):
     """베이스라인은 LightGBM이 켜지면 꺼지므로 active가 아니라 가장 최근 동결본을 찾는다"""
     cur.execute("SELECT id FROM prediction_versions WHERE model_type = 'BASELINE_MEAN' AND frozen_at IS NOT NULL "
@@ -305,6 +334,9 @@ def load_to_db(args) -> None:
     with connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT id FROM data_imports WHERE source_dataset = %s AND active", (SOURCE_DATASET,))
         imp = cur.fetchone()[0]
+        # 학습 때와 지금 DB의 원본 데이터가 같은지 확인 (리뷰 반영: 다르면 적재하지 않음)
+        check_same_data(metrics.get("source_data"), data_fingerprint(cur, imp))
+        step("원본 데이터 일치 확인")
         baseline_id = latest_baseline_id(cur)
 
         step("DB에 줄 넣는 중 (몇 분 걸릴 수 있어요)")
@@ -342,6 +374,7 @@ def main() -> None:
     step("DB에서 데이터 읽는 중")
     with connect() as conn, conn.cursor() as cur:
         imp, ev, holidays, targets, targets_eval, baseline_id = load(cur)
+        fingerprint = data_fingerprint(cur, imp)
     step(f"읽기 끝. 시민 신고 {len(ev):,}건, 대상 칸 {len(targets):,}개 (평가용: 7/31까지 지번 기준 {len(targets_eval):,}개)")
 
     # 1) 평가: 피처(1/1~5/31) → 정답(6/1~7/31)으로 학습, 피처(1/1~7/31)로 8/1~9/25 채점
@@ -392,7 +425,8 @@ def main() -> None:
     serve["top_percent"] = with_top_percent(serve, "rate")
     print(f"2단계 칸 비율 {(serve['top_percent'] <= CAUTION_TOP_PERCENT).mean():.1%}")
 
-    metrics = {"eval_targets": "7/31까지 신고 지번 200m 이내 칸 (검증 기간 위치 미반영), 대상 밖 신고는 놓친 것으로 계산",
+    metrics = {"source_data": fingerprint,
+               "eval_targets": "7/31까지 신고 지번 200m 이내 칸 (검증 기간 위치 미반영), 대상 밖 신고는 놓친 것으로 계산",
                "eval_lgbm": m_lgbm, "eval_baseline_same_split": m_base, "better_than_baseline": better,
                "eval_split": {k: [str(v[0]), str(v[1])] for k, v in WINDOWS.items()},
                "feature_importance_gain_share": {k: round(v / total_gain, 4) for k, v in imp_gain.items()},
