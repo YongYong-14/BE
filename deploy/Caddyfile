@@ -1,0 +1,11 @@
+{
+    # Suppress runtime request errors too: upstream failures can contain URIs.
+    log default {
+        level FATAL
+    }
+}
+
+{$DOMAIN} {
+    # Access logging is disabled (no log directive); never enable debug logging.
+    reverse_proxy app:8080
+}

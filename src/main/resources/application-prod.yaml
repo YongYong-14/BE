@@ -1,3 +1,27 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST}:${DB_PORT}/${POSTGRES_DB}?currentSchema=public
+    username: ${DB_APP_USER:parking_api}
+    password: ${DB_APP_PASSWORD}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  sql:
+    init:
+      mode: never
+  flyway:
+    enabled: true
+    url: ${spring.datasource.url}
+    user: ${DB_MIGRATION_USER:parking_migrator}
+    password: ${DB_MIGRATION_PASSWORD}
+    default-schema: public
+    schemas: public
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    clean-disabled: true
+    placeholder-replacement: false
+
 springdoc:
   api-docs:
     enabled: false
