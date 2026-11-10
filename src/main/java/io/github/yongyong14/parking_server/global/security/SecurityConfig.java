@@ -42,8 +42,9 @@ public class SecurityConfig {
     }
     @Bean SecurityFilterChain securityFilterChain(HttpSecurity http, AccessTokenService tokens,
             UserExistence users, SecurityErrorWriter errors, Environment env) throws Exception {
-        boolean docs = env.getProperty("app.security.swagger-public", Boolean.class, false)
-                && !env.matchesProfiles("prod");
+        boolean docs = env.matchesProfiles("prod")
+                ? env.getProperty("SWAGGER_ENABLED", Boolean.class, false)
+                : env.getProperty("app.security.swagger-public", Boolean.class, false);
         RequestMatcher publicRequests = request -> publicApi(request.getMethod(), request.getRequestURI().substring(request.getContextPath().length()))
                 || (docs && request.getMethod().equals("GET") && documentation(request.getRequestURI().substring(request.getContextPath().length())));
         http.sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
